@@ -3,23 +3,23 @@ import hashlib
 import io
 from decimal import Decimal
 
-from conftest import OFFICIAL, OFFICIAL_TEXT, source, write
+from conftest import SAMPLE, SAMPLE_TEXT, source, write
 from xml_auditfile import Auditfile, AuditfileSchema, AuditfileSource, MemorySink, ReadMode, ReadOptions, VersionSource
 
 
-def test_reads_the_official_test_file():
+def test_reads_the_sample_file():
     sink = MemorySink()
-    report = Auditfile.read(source(OFFICIAL), sink)
+    report = Auditfile.read(source(SAMPLE), sink)
 
     assert report.loaded
     assert report.schema.source is VersionSource.OFFICIAL
     assert len(report.row_counts) == 27
-    assert sink.rows("tr_line")[0]["amnt"] == Decimal("3.14")
-    assert sink.rows("tr_line")[0]["eff_date"] == dt.date(1967, 8, 13)
+    assert sink.rows("tr_line")[0]["amnt"] == Decimal("327.00")
+    assert sink.rows("tr_line")[0]["eff_date"] == dt.date(2025, 1, 15)
 
 
-def test_business_rules_find_the_unbalanced_transaction_in_the_official_test_file():
-    report = Auditfile.validate(source(OFFICIAL))
+def test_business_rules_find_the_unbalanced_transaction_in_the_sample_file():
+    report = Auditfile.validate(source(SAMPLE))
 
     assert any(d.code == "XAF-R001" for d in report.diagnostics)
     assert any(d.code == "XAF-R003" for d in report.diagnostics)
@@ -28,7 +28,7 @@ def test_business_rules_find_the_unbalanced_transaction_in_the_official_test_fil
 
 def test_rows_know_their_parent_and_order():
     sink = MemorySink()
-    Auditfile.read(source(OFFICIAL), sink)
+    Auditfile.read(source(SAMPLE), sink)
 
     transaction = sink.rows("transaction")[0]
     line = sink.rows("tr_line")[0]
@@ -38,13 +38,13 @@ def test_rows_know_their_parent_and_order():
 
 
 def test_split_files_read_as_one_audit_file():
-    cut = OFFICIAL_TEXT.index("<transaction>")
-    first = OFFICIAL_TEXT[:cut].encode("utf-8")
-    second = ("<!-- Vervolgbestand 2 van 2 -->\n" + OFFICIAL_TEXT[cut:]).encode("utf-8")
+    cut = SAMPLE_TEXT.index("<transaction>")
+    first = SAMPLE_TEXT[:cut].encode("utf-8")
+    second = ("<!-- Vervolgbestand 2 van 2 -->\n" + SAMPLE_TEXT[cut:]).encode("utf-8")
 
     whole = MemorySink()
     split = MemorySink()
-    Auditfile.read(source(OFFICIAL), whole)
+    Auditfile.read(source(SAMPLE), whole)
     report = Auditfile.read(AuditfileSource.from_factories(("split.xaf", lambda: first), ("split-2.xaf", lambda: second)), split)
 
     assert len(report.parts) == 2
@@ -53,7 +53,7 @@ def test_split_files_read_as_one_audit_file():
 
 
 def test_single_use_stream_is_validated_during_load_and_aborted_when_invalid():
-    invalid = OFFICIAL_TEXT.replace("<header>", "<header><vendorExtra>1</vendorExtra>", 1)
+    invalid = SAMPLE_TEXT.replace("<header>", "<header><vendorExtra>1</vendorExtra>", 1)
     stream = io.BytesIO(invalid.encode("utf-8"))
     sink = MemorySink()
 
@@ -66,7 +66,7 @@ def test_single_use_stream_is_validated_during_load_and_aborted_when_invalid():
 
 
 def test_unverified_mode_skips_unknown_elements_with_a_warning():
-    path = write("extra.xaf", OFFICIAL_TEXT.replace("<header>", "<header><vendorExtra>1</vendorExtra>", 1))
+    path = write("extra.xaf", SAMPLE_TEXT.replace("<header>", "<header><vendorExtra>1</vendorExtra>", 1))
 
     report = Auditfile.read(source(path), MemorySink(), ReadOptions(mode=ReadMode.UNVERIFIED))
 
@@ -75,26 +75,26 @@ def test_unverified_mode_skips_unknown_elements_with_a_warning():
 
 
 def test_scan_counts_rows_and_the_schema_survives_json():
-    report = Auditfile.scan(source(OFFICIAL))
+    report = Auditfile.scan(source(SAMPLE))
     text = report.schema.to_json()
     back = AuditfileSchema.from_json(text)
 
     assert report.schema.has_row_counts
-    assert report.schema.table("tr_line").row_count == 1
+    assert report.schema.table("tr_line").row_count == 7
     assert back.to_json() == text
     assert back.table("tr_line").find_column("amnt").definition is not None
 
 
 def test_parts_report_size_and_sha256_of_the_bytes_as_read():
-    report = Auditfile.scan(source(OFFICIAL))
-    data = OFFICIAL.read_bytes()
+    report = Auditfile.scan(source(SAMPLE))
+    data = SAMPLE.read_bytes()
 
     assert report.parts[0].size == len(data)
     assert report.parts[0].sha256 == hashlib.sha256(data).hexdigest()
 
 
 def test_files_in_a_single_byte_encoding_are_decoded():
-    text = OFFICIAL_TEXT.replace('encoding="UTF-8"', 'encoding="windows-1252"', 1).replace("<companyName>", "<companyName>Café ", 1)
+    text = SAMPLE_TEXT.replace('encoding="UTF-8"', 'encoding="windows-1252"', 1).replace("<companyName>", "<companyName>Café ", 1)
     data = text.encode("cp1252")
     sink = MemorySink()
 
@@ -104,9 +104,9 @@ def test_files_in_a_single_byte_encoding_are_decoded():
 
 
 def test_reading_rows_yourself_sees_every_row():
-    reader = Auditfile.open(source(OFFICIAL), ReadOptions(mode=ReadMode.UNVERIFIED))
+    reader = Auditfile.open(source(SAMPLE), ReadOptions(mode=ReadMode.UNVERIFIED))
     lines = sum(1 for row in reader.read_rows() if row.table.name == "tr_line")
 
     assert reader.schema.version_key == "xaf/3.2"
-    assert lines == 1
-    assert reader.report.row_counts["tr_line"] == 1
+    assert lines == 7
+    assert reader.report.row_counts["tr_line"] == 7

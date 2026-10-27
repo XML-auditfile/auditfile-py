@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from conftest import OFFICIAL, OFFICIAL_TEXT, source
+from conftest import SAMPLE, SAMPLE_TEXT, source
 from xml_auditfile import Auditfile, AuditfileSource, AuditfileVersion
 from xml_auditfile.xsd._regex import translate_pattern
 
@@ -13,37 +13,37 @@ def xsd_errors(text):
     return [d.message for d in report.diagnostics if d.code == "XAF-D001"]
 
 
-def test_the_official_test_file_is_valid_against_its_xsd():
-    report = Auditfile.scan(source(OFFICIAL))
+def test_the_sample_file_is_valid_against_its_xsd():
+    report = Auditfile.scan(source(SAMPLE))
     assert [d for d in report.diagnostics if d.code.startswith("XAF-D")] == []
 
 
 def test_facets_are_checked():
-    errors = xsd_errors(OFFICIAL_TEXT.replace("<fiscalYear>2016</fiscalYear>", "<fiscalYear>2016-2017-2018</fiscalYear>", 1))
+    errors = xsd_errors(SAMPLE_TEXT.replace("<fiscalYear>2025</fiscalYear>", "<fiscalYear>2025-2017-2018</fiscalYear>", 1))
     assert len(errors) == 1
     assert "maxLength" in errors[0]
 
 
 def test_enumerations_are_checked():
-    errors = xsd_errors(OFFICIAL_TEXT.replace("<curCode>EUR</curCode>", "<curCode>XXX</curCode>", 1))
+    errors = xsd_errors(SAMPLE_TEXT.replace("<curCode>EUR</curCode>", "<curCode>XXX</curCode>", 1))
     assert len(errors) == 1
     assert "enumeration" in errors[0]
 
 
 def test_the_element_order_of_a_sequence_is_checked():
-    errors = xsd_errors(re.sub(r"<startDate>[^<]*</startDate>", "", OFFICIAL_TEXT, count=1))
+    errors = xsd_errors(re.sub(r"<startDate>[^<]*</startDate>", "", SAMPLE_TEXT, count=1))
     assert len(errors) == 1
     assert re.search("endDate.*not expected.*startDate", errors[0])
 
 
 def test_dates_must_be_real_dates():
-    errors = xsd_errors(OFFICIAL_TEXT.replace("<startDate>2016-01-01</startDate>", "<startDate>2016-02-30</startDate>", 1))
+    errors = xsd_errors(SAMPLE_TEXT.replace("<startDate>2025-01-01</startDate>", "<startDate>2025-02-30</startDate>", 1))
     assert len(errors) == 1
     assert "xs:date" in errors[0]
 
 
 def test_text_in_element_only_content_is_refused():
-    errors = xsd_errors(OFFICIAL_TEXT.replace("<header>", "<header>text", 1))
+    errors = xsd_errors(SAMPLE_TEXT.replace("<header>", "<header>text", 1))
     assert len(errors) == 1
     assert "element-only" in errors[0]
 

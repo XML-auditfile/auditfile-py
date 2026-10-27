@@ -105,29 +105,71 @@ def _severity(entry: dict[str, Any]) -> DiagnosticSeverity:
 
 
 class DiagnosticCollector:
-    """Collects diagnostics, formats messages from diagnostics.json and caps the total."""
+    """
+    Collects diagnostics, formats messages from diagnostics.json and caps the list.
+    The counts per severity cover every diagnostic, also the ones left out of a full list,
+    and a full list makes room for an error by dropping an info or warning, so errors are never hidden behind them.
+    """
 
     def __init__(self, language: TextLanguage, maximum: int) -> None:
         self._language = language
         self._maximum = maximum
-        self._capped = False
-        self.items: list[Diagnostic] = []
-        self.has_fatal = False
-        self.has_errors = False
+        self._capped: Diagnostic | None = None
+        self._items: list[Diagnostic] = []
+        self.counts: dict[DiagnosticSeverity, int] = dict.fromkeys(DiagnosticSeverity, 0)
+        """Number of diagnostics per severity, including the ones left out."""
+
+    @property
+    def items(self) -> list[Diagnostic]:
+        """The kept diagnostics, followed by XAF-X900 when some were left out."""
+        return self._items if self._capped is None else [*self._items, self._capped]
+
+    @property
+    def has_fatal(self) -> bool:
+        return self.counts[DiagnosticSeverity.FATAL] > 0
+
+    @property
+    def has_errors(self) -> bool:
+        return self.has_fatal or self.counts[DiagnosticSeverity.ERROR] > 0
+
+    @property
+    def is_truncated(self) -> bool:
+        """True when diagnostics were left out of items."""
+        return self._capped is not None
 
     def add(self, code: str, location: Location = NO_LOCATION, **arguments: object) -> None:
         severity = _severity(_entry(code))
-        self.has_fatal |= severity is DiagnosticSeverity.FATAL
-        self.has_errors |= severity >= DiagnosticSeverity.ERROR
+        self.counts[severity] += 1
 
-        if len(self.items) >= self._maximum and severity is not DiagnosticSeverity.FATAL:
-            if not self._capped:
-                self._capped = True
-                self.items.append(self._create("XAF-X900", NO_LOCATION, {"max": self._maximum}))
+        if len(self._items) >= self._maximum and not self._make_room_for(severity):
+            if self._capped is None:
+                self._capped = self._create("XAF-X900", NO_LOCATION, {"max": self._maximum})
 
             return
 
-        self.items.append(self._create(code, location, arguments))
+        self._items.append(self._create(code, location, arguments))
+
+    def _make_room_for(self, severity: DiagnosticSeverity) -> bool:
+        """
+        A fatal diagnostic is always kept. An error replaces the last info or warning in the list;
+        a dropped diagnostic still counts, and the list is marked as truncated.
+        """
+        if severity is DiagnosticSeverity.FATAL:
+            return True
+
+        if severity is not DiagnosticSeverity.ERROR:
+            return False
+
+        for lower in (DiagnosticSeverity.INFO, DiagnosticSeverity.WARNING):
+            for index in range(len(self._items) - 1, -1, -1):
+                if self._items[index].severity is lower:
+                    del self._items[index]
+                    if self._capped is None:
+                        self._capped = self._create("XAF-X900", NO_LOCATION, {"max": self._maximum})
+
+                    return True
+
+        return False
 
     def _create(self, code: str, location: Location, arguments: Mapping[str, object]) -> Diagnostic:
         entry = _entry(code)
@@ -150,25 +192,46 @@ class AuditfileReport:
         row_counts: Mapping[str, int],
         loaded: bool,
         duration: timedelta,
+        *,
+        counts: Mapping[DiagnosticSeverity, int] | None = None,
+        truncated: bool = False,
     ) -> None:
         self.schema = schema
         """The import schema, or None when the version could not be determined."""
         self.parts: tuple[PartInfo, ...] = tuple(parts)
         """Source parts with size and SHA-256 (empty when a part was not read completely)."""
         self.diagnostics: tuple[Diagnostic, ...] = tuple(diagnostics)
-        """All diagnostics, in the order they were found."""
+        """
+        The diagnostics, in the order they were found, at most max_diagnostics plus XAF-X900 when more were found.
+        A full list makes room for errors by leaving out infos and warnings; fatal diagnostics are always included.
+        """
+        self.is_truncated = truncated
+        """True when diagnostics were left out of diagnostics; count() still counts them."""
         self.row_counts: Mapping[str, int] = MappingProxyType(dict(row_counts))
         """Rows per table."""
         self.loaded = loaded
         """True when rows were handed to the sink and completed."""
         self.duration = duration
         """Time taken."""
+        if counts is None:
+            counts = {s: sum(1 for d in self.diagnostics if d.severity == s and d.code != "XAF-X900") for s in DiagnosticSeverity}
+        self._counts: Mapping[DiagnosticSeverity, int] = MappingProxyType({s: counts.get(s, 0) for s in DiagnosticSeverity})
+
+    @property
+    def has_fatal(self) -> bool:
+        """True when a fatal diagnostic was found: reading stopped."""
+        return self._counts[DiagnosticSeverity.FATAL] > 0
+
+    @property
+    def has_errors(self) -> bool:
+        """True when an error or fatal diagnostic was found, also when it is not in a truncated diagnostics list."""
+        return self.has_fatal or self._counts[DiagnosticSeverity.ERROR] > 0
 
     @property
     def is_valid(self) -> bool:
         """True when there are no errors and no fatal diagnostics."""
-        return not any(d.severity >= DiagnosticSeverity.ERROR for d in self.diagnostics)
+        return not self.has_errors
 
     def count(self, severity: DiagnosticSeverity) -> int:
-        """Number of diagnostics with the given severity."""
-        return sum(1 for d in self.diagnostics if d.severity == severity)
+        """Number of diagnostics with the given severity, including the ones left out of a truncated diagnostics list."""
+        return self._counts[severity]

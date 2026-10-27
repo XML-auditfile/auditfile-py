@@ -12,10 +12,12 @@ from .definitions import ColumnType
 _INTEGER = re.compile(r"[+-]?[0-9]+")
 _DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 _TIME_ZONE = re.compile(r"|Z|[+-][0-9]{2}:[0-9]{2}")
+# Only the XSD notation: a date-time like 03/01/2017 10:00:00 or with a space instead of T is refused, never guessed.
 _DATE_TIME = re.compile(
-    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,7}))?(Z|[+-][0-9]{2}:[0-9]{2})?"
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,7}))?(Z|[+-][0-9]{2}:[0-9]{2})?"
 )
-_TIME = re.compile(r"([0-9]{2}):([0-9]{2}):([0-9]{2})")
+# hh:mm:ss with an optional fraction (dropped) and time zone (ignored), as for a date.
+_TIME = re.compile(r"([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})?")
 
 # The range of .NET long, so every implementation accepts the same integers.
 _MIN_INTEGER = -(2**63)
@@ -84,7 +86,7 @@ def _convert(text: str, type_: ColumnType) -> object:
             return _MISSING
 
     if type_ is ColumnType.TIME:
-        match = _TIME.fullmatch(text[:8] if len(text) >= 8 else text)
+        match = _TIME.fullmatch(text)
         if match is None:
             return _MISSING
 

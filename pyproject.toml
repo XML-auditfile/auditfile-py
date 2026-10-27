@@ -26,7 +26,9 @@ Repository = "https://github.com/XML-auditfile/auditfile-py"
 Specification = "https://github.com/XML-auditfile/auditfile-spec"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+pandas = ["pandas>=2.0"]
+polars = ["polars>=1.0"]
+test = ["pytest>=8", "pandas>=2.0", "polars>=1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xml_auditfile"]
@@ -34,7 +36,7 @@ packages = ["src/xml_auditfile"]
 artifacts = ["src/xml_auditfile/_spec/**"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/xml_auditfile", "tests", "samples", "tools", "spec.lock.json", "README.md", "CHANGELOG.md", "LICENSE"]
+include = ["src/xml_auditfile", "tests", "tools", "spec.lock.json", "README.md", "CHANGELOG.md", "LICENSE"]
 artifacts = ["src/xml_auditfile/_spec/**"]
 
 [tool.pytest.ini_options]

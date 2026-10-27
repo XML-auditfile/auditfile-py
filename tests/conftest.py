@@ -1,23 +1,28 @@
-"""The official XAF 3.2 test file from auditfile-spec, and variations of it written to a temporary folder."""
+"""The XAF 3.2 sample of this repository (tests/data), with two intended findings (XAF-R001, XAF-R003),
+and variations of it written to a temporary folder."""
 
 from __future__ import annotations
 
-import os
+import atexit
+import shutil
 import tempfile
 from pathlib import Path
 
 from xml_auditfile import AuditfileSource
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC_ROOT = (ROOT / os.environ.get("SPEC_ROOT", "spec")).resolve()
-
 OFFICIAL_NAMESPACE = "http://www.auditfiles.nl/XAF/3.2"
-OFFICIAL = SPEC_ROOT / "sources" / "xaf" / "XAF_3.2_20170904" / "XmlAuditfileFinancieel3.2_test.xml"
-OFFICIAL_TEXT = OFFICIAL.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+SAMPLE = ROOT / "tests" / "data" / "xaf-3.2-sample.xaf"
+SAMPLE_TEXT = SAMPLE.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+_RUN_FOLDER = Path(tempfile.mkdtemp(prefix="xmlauditfile-py-tests-"))
+"""One folder per test run, removed when it ends."""
+atexit.register(shutil.rmtree, _RUN_FOLDER, ignore_errors=True)
 
 
 def write(name: str, content: str) -> Path:
-    path = Path(tempfile.mkdtemp(prefix="auditfile-py-tests-")) / name
+    path = Path(tempfile.mkdtemp(dir=_RUN_FOLDER)) / name
     path.write_bytes(content.encode("utf-8"))
     return path
 
@@ -28,4 +33,4 @@ def source(path: Path) -> AuditfileSource:
 
 
 def with_namespace(ns: str) -> Path:
-    return write("namespace.xaf", OFFICIAL_TEXT.replace(f'xmlns="{OFFICIAL_NAMESPACE}"', f'xmlns="{ns}"'))
+    return write("namespace.xaf", SAMPLE_TEXT.replace(f'xmlns="{OFFICIAL_NAMESPACE}"', f'xmlns="{ns}"'))

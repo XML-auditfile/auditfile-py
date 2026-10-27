@@ -1,11 +1,13 @@
 """Streaming reader for Dutch tax audit files (XAF and related), following auditfile-spec."""
 
 from ._json import JsonFormatError
-from .auditfile import Auditfile, AuditfileReader
+from .auditfile import Auditfile, AuditfileReader, SinkAbortError
+from .custom import DialectRegistry, ViewRegistry
 from .definitions import (
     AuditfileManifest,
     ColumnType,
     Dialect,
+    DialectAction,
     DialectCorrection,
     ElementDefinition,
     LocalizedText,
@@ -14,19 +16,21 @@ from .definitions import (
     ManifestReference,
     ManifestTable,
     TextLanguage,
+    ViewAggregate,
     ViewColumn,
     ViewDefinition,
     ViewJoin,
     ViewJoinCondition,
+    ViewOperator,
     ViewParameter,
     ViewValue,
 )
 from .diagnostics import AuditfileReport, Diagnostic, DiagnosticSeverity
 from .memory import MemorySink
-from .options import ReadMode, ReadOptions, ReadProgress
+from .options import ReadCancelledError, ReadMode, ReadOptions, ReadProgress
 from .rows import AuditfileRow
 from .schema import AuditfileSchema, SchemaColumn, SchemaTable, VersionSource
-from .sinks import AuditfileStore, ImportContext, Sink, SinkCapabilities
+from .sinks import ImportContext, Sink, SinkCapabilities
 from .source import AuditfileSource, PartInfo, SourcePart
 from .versions import AuditfileVersion
 from .views import ViewResult
@@ -40,13 +44,14 @@ __all__ = [
     "AuditfileRow",
     "AuditfileSchema",
     "AuditfileSource",
-    "AuditfileStore",
     "AuditfileVersion",
     "ColumnType",
     "Diagnostic",
     "DiagnosticSeverity",
     "Dialect",
+    "DialectAction",
     "DialectCorrection",
+    "DialectRegistry",
     "ElementDefinition",
     "ImportContext",
     "JsonFormatError",
@@ -57,21 +62,26 @@ __all__ = [
     "ManifestTable",
     "MemorySink",
     "PartInfo",
+    "ReadCancelledError",
     "ReadMode",
     "ReadOptions",
     "ReadProgress",
     "SchemaColumn",
     "SchemaTable",
     "Sink",
+    "SinkAbortError",
     "SinkCapabilities",
     "SourcePart",
     "TextLanguage",
     "VersionSource",
+    "ViewAggregate",
     "ViewColumn",
     "ViewDefinition",
     "ViewJoin",
     "ViewJoinCondition",
+    "ViewOperator",
     "ViewParameter",
+    "ViewRegistry",
     "ViewResult",
     "ViewValue",
     "XsdError",

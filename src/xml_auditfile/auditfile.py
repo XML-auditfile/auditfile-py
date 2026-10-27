@@ -4,13 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+from . import custom
 from ._session import ReadSession
 from .diagnostics import AuditfileReport
-from .options import DEFAULT_OPTIONS, ReadMode, ReadOptions, ReadProgress
+from .options import DEFAULT_OPTIONS, ReadOptions, ReadProgress
 from .rows import AuditfileRow
 from .schema import AuditfileSchema, SchemaTable
 from .sinks import ImportContext, NullSink, Sink, SinkCapabilities, check_sink
 from .source import AuditfileSource
+
+
+class SinkAbortError(Exception):
+    """The import failed, and aborting the sink failed too. Holds both errors."""
+
+    def __init__(self, error: Exception, abort_error: Exception) -> None:
+        super().__init__(f"The import failed ({error}), and aborting the sink failed too ({abort_error}).")
+        self.error = error
+        """Why the import failed."""
+        self.abort_error = abort_error
+        """Why aborting the sink failed."""
 
 
 def _check_source(source: object) -> AuditfileSource:
@@ -39,6 +51,12 @@ class Auditfile:
         sink = MemorySink()
         report = Auditfile.read(AuditfileSource.from_factory(lambda: open("admin.xaf", "rb"), "admin.xaf"), sink)
     """
+
+    dialects: custom.DialectRegistry = custom.dialects
+    """Dialects added at runtime, next to the built-in ones: ``Auditfile.dialects.add("xaf/3.2", json)``. Shared by every read in this process."""
+
+    views: custom.ViewRegistry = custom.views
+    """Views added at runtime, next to the built-in ones: ``Auditfile.views.add(json)``, then ``version.find_view(name)``. Shared by every read in this process."""
 
     @staticmethod
     def read(source: AuditfileSource, sink: Sink, options: ReadOptions | None = None) -> AuditfileReport:
@@ -82,9 +100,15 @@ class Auditfile:
 
             if settings.on_progress is not None:
                 settings.on_progress(ReadProgress(rows, total))
-        except BaseException:
+        except BaseException as error:
             session.dispose()
-            sink.abort(session.create_report(False))
+            try:
+                sink.abort(session.create_report(False))
+            except Exception as abort_error:
+                # A failing rollback must not hide why the import failed: the caller gets both.
+                if isinstance(error, Exception):
+                    raise SinkAbortError(error, abort_error) from error
+
             raise
 
         failed = session.diagnostics.has_fatal or (session.validate_during_load and session.diagnostics.has_errors)
@@ -98,8 +122,13 @@ class Auditfile:
 
     @staticmethod
     def validate(source: AuditfileSource, options: ReadOptions | None = None) -> AuditfileReport:
-        """Validates an audit file completely (XSD, structure, keys, business rules) without storing anything."""
-        return Auditfile.read(source, NullSink(), _check_options(options).with_mode(ReadMode.VERIFIED))
+        """
+        Validates an audit file (structure, keys, business rules) without storing anything.
+        In verified mode (the default) the XSD is checked first and the rest only for a valid file;
+        unverified mode skips the XSD and checks everything else, which is faster but reports fewer deviations
+        (e.g. XAF-S004 instead of XAF-D001 for an invalid value).
+        """
+        return Auditfile.read(source, NullSink(), options)
 
     @staticmethod
     def scan(source: AuditfileSource, options: ReadOptions | None = None) -> AuditfileReport:
@@ -130,6 +159,7 @@ class AuditfileReader:
         self._session = session
         self._ready = ready
         self._started = False
+        self._report: AuditfileReport | None = None
 
     @property
     def schema(self) -> AuditfileSchema | None:
@@ -137,12 +167,30 @@ class AuditfileReader:
         return self._session.schema if self._ready else None
 
     def read_rows(self) -> Iterator[AuditfileRow]:
-        """Rows in document order; a row is returned when its element closes."""
-        if self._ready and not self._started:
-            self._started = True
+        """
+        Rows in document order; a row is returned when its element closes. The rows are read while you iterate,
+        and can be iterated only once: collect them in a list when you need them twice.
+
+        :raises RuntimeError: The rows are iterated a second time.
+        """
+        if self._started:
+            raise RuntimeError("The rows of an audit file can be iterated only once; collect them in a list to use them twice.")
+
+        self._started = True
+        if self._ready:
             yield from self._session.load()
 
     @property
     def report(self) -> AuditfileReport:
-        """The report; complete after read_rows has been iterated to the end."""
-        return self._session.create_report(False)
+        """
+        The report; complete after read_rows has been iterated to the end. Until then every call gives the report so far;
+        the complete report is made once and kept.
+        """
+        if self._report is not None:
+            return self._report
+
+        report = self._session.create_report(False)
+        if not self._ready or self._session.loaded:
+            self._report = report
+
+        return report

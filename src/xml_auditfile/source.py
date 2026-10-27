@@ -9,6 +9,10 @@ Stream = Union[BinaryIO, bytes, bytearray, memoryview]
 """A binary stream (anything with ``read(n)`` returning bytes), or the bytes themselves."""
 
 
+class SourceUsageError(RuntimeError):
+    """A source used in a way it does not allow, such as reading a single-use stream twice: the caller's mistake."""
+
+
 class SourcePart:
     """One part of a source."""
 
@@ -60,7 +64,7 @@ class AuditfileSource:
             def open_() -> tuple[Stream, bool]:
                 nonlocal used
                 if used:
-                    raise RuntimeError("This stream source can only be read once.")
+                    raise SourceUsageError("This stream source can only be read once.")
 
                 used = True
                 return stream, True

@@ -1,8 +1,8 @@
-"""Sinks receive an import; a store gives one back."""
+"""Sinks receive an import."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from enum import IntFlag
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -54,19 +54,6 @@ class Sink(Protocol):
 
     def abort(self, report: AuditfileReport) -> None:
         """The import failed; discard everything received since begin."""
-
-
-class AuditfileStore(Protocol):
-    """
-    A stored import, e.g. in a database. Gives back the schema and the rows per table,
-    so code can work with an import regardless of where it is stored. Implemented by connectors.
-    """
-
-    def get_schema(self) -> AuditfileSchema:
-        """The schema of the stored import."""
-
-    def read_rows(self, table: str, on_batch: Callable[[Sequence[AuditfileRow]], None]) -> None:
-        """Reads the rows of one table in batches, in id order."""
 
 
 class NullSink:

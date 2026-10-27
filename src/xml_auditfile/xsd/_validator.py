@@ -6,12 +6,12 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from .._keys import SEPARATOR as _SEPARATOR
 from ._datatypes import digits_of, normalize_white_space
 from ._schema_set import ComplexType, Constraint, ElementDeclaration, SchemaSet, SimpleType, qualified
 
 _XSI = "http://www.w3.org/2001/XMLSchema-instance"
 _XMLNS = "http://www.w3.org/2000/xmlns/"
-_SEPARATOR = "\u001f"
 _MAX_PENDING_REFERENCES = 100_000
 _MAX_SHOWN = 100
 
@@ -112,7 +112,7 @@ def _key_value(type_: SimpleType, value: str) -> str:
 
 
 class _Frame:
-    __slots__ = ("skip", "local", "type", "index", "count", "broken", "text", "text_reported", "scopes", "notified", "active", "depth")
+    __slots__ = ("skip", "local", "type", "index", "count", "broken", "text", "length", "text_reported", "scopes", "notified", "active", "depth")
 
     def __init__(self, skip: bool, local: str, type_: Any, depth: int) -> None:
         self.skip = skip
@@ -121,7 +121,8 @@ class _Frame:
         self.index = 0
         self.count = 0
         self.broken = False
-        self.text: list[str] = []
+        self.text: list[str] | None = []
+        self.length = 0
         self.text_reported = False
         self.scopes: list[_IdentityScope] = []
         """Identity constraints declared on this element."""
@@ -138,7 +139,13 @@ class XsdValidator:
     it reports every violation through report(message, line, column) and never stops on its own.
     """
 
-    def __init__(self, schema_set: SchemaSet, report: Report) -> None:
+    def __init__(self, schema_set: SchemaSet, report: Report, max_value_length: int | None = None, identity_constraints: bool = True) -> None:
+        """
+        Longer values than max_value_length are not kept and not checked; the reader reports them (XAF-S008).
+        identity_constraints evaluates key, unique and keyref; off when another check does that work.
+        """
+        self._max_value_length = max_value_length
+        self._identity_constraints = identity_constraints
         self._set = schema_set
         self._report = report
         self._stack: list[_Frame] = []
@@ -159,7 +166,7 @@ class XsdValidator:
             frame.notified = parent.active
             frame.active = [scope for scope in parent.active if scope.start(event)]
 
-        if declaration is not None and declaration.constraints:
+        if declaration is not None and declaration.constraints and self._identity_constraints:
             frame.scopes = [_IdentityScope(constraint, event.depth) for constraint in declaration.constraints]
             for scope in frame.scopes:
                 if scope.constraint.kind == "keyref":
@@ -178,7 +185,12 @@ class XsdValidator:
             return
 
         if isinstance(frame.type, SimpleType):
-            frame.text.append(event.text)
+            if frame.text is not None:
+                frame.length += len(event.text)
+                if self._max_value_length is not None and frame.length > self._max_value_length:
+                    frame.text = None
+                else:
+                    frame.text.append(event.text)
         elif isinstance(frame.type, ComplexType) and not frame.text_reported and event.text.strip(" \t\r\n"):
             frame.text_reported = True
             self._error(event, f"Element '{frame.local}': Character content other than whitespace is not allowed because the content type is 'element-only'.")
@@ -190,7 +202,7 @@ class XsdValidator:
         frame = self._stack.pop()
         value = None
         if not frame.skip:
-            if isinstance(frame.type, SimpleType):
+            if isinstance(frame.type, SimpleType) and frame.text is not None:
                 normalized, error = validate_simple(frame.type, "".join(frame.text))
                 if error is not None:
                     self._error(event, f"Element '{frame.local}': {error}")

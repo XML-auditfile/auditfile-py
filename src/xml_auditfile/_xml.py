@@ -10,7 +10,7 @@ import re
 from collections import deque
 from xml.parsers import expat
 
-from ._streams import ConcatenatedStream
+from ._streams import ConcatenatedStream, XmlEncodingError
 
 START = 1
 END = 2
@@ -51,14 +51,6 @@ class XmlSyntaxError(Exception):
         self.part = part
 
 
-class XmlEncodingError(Exception):
-    """The declared encoding is not supported."""
-
-    def __init__(self, encoding: str) -> None:
-        super().__init__(f"Encoding '{encoding}' is not supported.")
-        self.encoding = encoding
-
-
 class _Refused(Exception):
     """Raised inside a handler to stop the parser."""
 
@@ -75,7 +67,9 @@ def _split(name: str) -> tuple[str, str]:
 
 
 class XmlReader:
-    def __init__(self, stream: ConcatenatedStream) -> None:
+    def __init__(self, stream: ConcatenatedStream, max_bytes: int = 0) -> None:
+        """max_bytes: size of the whole document; 0 is no limit."""
+        self._max_bytes = max_bytes
         self._stream = stream
         self._chunks = stream.chunks()
         self._queue: deque[Event] = deque()
@@ -85,6 +79,9 @@ class XmlReader:
         self._first: bytes | None = None
         self._map_from: str | None = None
         self._map_to = ""
+        self._fed = 0
+        self.root_offset: int | None = None
+        """Bytes before the chunk in which the root element starts; precise to one chunk (64 KB)."""
 
         parser = expat.ParserCreate(namespace_separator=" ")
         parser.buffer_text = True
@@ -152,7 +149,13 @@ class XmlReader:
             if self._first is None:
                 self._first = data[:512]
 
+            self._fed += len(data)
+            if self._max_bytes and self._fed > self._max_bytes:
+                raise _Refused(f"The document is larger than {self._max_bytes} bytes.", self._parser.CurrentLineNumber, self._parser.CurrentColumnNumber + 1)
+
             self._parser.Parse(data, False)
+            # Text is handed out per chunk, so a huge text node is never joined into one string here.
+            self._flush()
         except _Refused as refused:
             self._ended = True
             raise XmlSyntaxError(refused.message, refused.line, refused.column, self._stream.part) from None
@@ -201,6 +204,9 @@ class XmlReader:
         self._queue.append(
             Event(START, ns, local, pairs, parser.CurrentLineNumber, parser.CurrentColumnNumber + 2, self._depth, self._stream.part, "")
         )
+        if self._depth == 0:
+            self.root_offset = self._fed
+
         self._depth += 1
 
     def _end(self, name: str) -> None:

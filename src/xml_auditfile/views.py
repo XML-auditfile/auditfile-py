@@ -7,19 +7,25 @@ so a missing ancestor or lookup leaves its columns None.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from decimal import Decimal
 from functools import cmp_to_key
+from typing import TYPE_CHECKING
 
 from ._decimal import add, parse_decimal
-from .definitions import ColumnType, TextLanguage, ViewColumn, ViewDefinition, ViewValue
+from ._frames import Decimals, pandas_frame, polars_frame
+from ._keys import SEPARATOR as _SEPARATOR
+from .definitions import ColumnType, TextLanguage, ViewAggregate, ViewColumn, ViewDefinition, ViewOperator, ViewValue
 from .diagnostics import NO_LOCATION, Diagnostic, DiagnosticCollector
 from .rows import AuditfileRow
 from .schema import AuditfileSchema, SchemaColumn
 from .values import to_text, try_convert
 
+if TYPE_CHECKING:
+    import pandas
+    import polars
+
 _MAXIMUM_DIAGNOSTICS = 100
-_SEPARATOR = "\u001f"
 
 Input = list["AuditfileRow | None"]
 
@@ -41,6 +47,31 @@ class ViewResult:
     def columns(self) -> tuple[ViewColumn, ...]:
         """Output columns; each row has one value per column, in this order."""
         return self.view.columns
+
+    def to_pandas(self, decimals: Decimals = "decimal", labels: TextLanguage | None = None) -> pandas.DataFrame:
+        """
+        The rows as a pandas DataFrame (needs ``pip install xml-auditfile[pandas]``), one column per view column.
+
+        Column names are the view column names (``amount``), or their labels in ``labels`` (``Bedrag``).
+        Types follow the values, as in ``MemorySink.to_pandas``; decimals stay exact unless ``decimals="float"``.
+        """
+        return pandas_frame(self._frame_columns(labels), self.rows, decimals)
+
+    def to_polars(self, decimals: Decimals = "decimal", labels: TextLanguage | None = None) -> polars.DataFrame:
+        """
+        The rows as a polars DataFrame (needs ``pip install xml-auditfile[polars]``), one column per view column.
+
+        Column names are the view column names, or their labels in ``labels``. Types follow the values, as in
+        ``MemorySink.to_polars``; decimals stay exact unless ``decimals="float"``.
+        """
+        return polars_frame(self._frame_columns(labels), self.rows, decimals)
+
+    def _frame_columns(self, labels: TextLanguage | None) -> list[tuple[str, None]]:
+        def name(column: ViewColumn) -> str:
+            text = column.label.get(labels) if labels is not None and column.label is not None else None
+            return text or column.name
+
+        return [(name(c), None) for c in self.columns]
 
 
 class _Ref:
@@ -72,20 +103,32 @@ def run_view(
     diagnostics = DiagnosticCollector(language, _MAXIMUM_DIAGNOSTICS)
     slots = [view.source, *(j.table for j in view.joins)]
 
-    missing = _find_missing(view, schema, slots)
+    # The table each slot reads: a join with alternatives may read a table of another name in this version.
+    tables = {view.source: view.source}
+    for join in view.joins:
+        tables[join.table] = next((t for t in (join.table, *join.alternatives) if schema.find_table(t) is not None), join.table)
+
+    missing = _find_missing(view, schema, slots, tables)
     if missing is not None:
         diagnostics.add("XAF-Q001", NO_LOCATION, view=view.name, standard=schema.version_key, missing=missing)
         return ViewResult(view, False, [], diagnostics.items)
 
     def resolve(reference: str) -> _Ref:
         table, column = _split(reference)
-        found = schema.table(table).find_column(column)
+        found = schema.table(tables[table]).find_column(column)
         assert found is not None
         return _Ref(slots.index(table), found)
 
+    def column_values(reference: str) -> Iterator[object]:
+        table, column = _split(reference)
+        found = schema.table(tables[table]).find_column(column)
+        assert found is not None
+        for row in rows(tables[table]):
+            yield row.values[found.index]
+
     filters = _build_filters(view, parameters, resolve)
-    columns = [(c, None if c.value is None else _Expression(c.value, resolve)) for c in view.columns]
-    joins = _build_joins(view, schema, rows, resolve, diagnostics)
+    columns = [(c, None if c.value is None else _Expression(c.value, resolve, column_values)) for c in view.columns]
+    joins = _build_joins(view, schema, rows, tables, resolve, diagnostics)
 
     inputs: list[Input] = []
     for source in rows(view.source):
@@ -124,14 +167,14 @@ def run_view(
     return ViewResult(view, True, result, diagnostics.items)
 
 
-def _find_missing(view: ViewDefinition, schema: AuditfileSchema, slots: list[str]) -> str | None:
+def _find_missing(view: ViewDefinition, schema: AuditfileSchema, slots: list[str], tables: dict[str, str]) -> str | None:
     """Returns the first table or "table.column" the view needs but the schema lacks, or None."""
     for table in slots:
-        if schema.find_table(table) is None:
+        if schema.find_table(tables[table]) is None:
             return table
 
     for join in view.joins:
-        if not join.on and _ancestor_path(schema, view.source, join.table) is None:
+        if not join.on and _ancestor_path(schema, view.source, tables[join.table]) is None:
             return join.table
 
     references: list[str | None] = [
@@ -144,7 +187,7 @@ def _find_missing(view: ViewDefinition, schema: AuditfileSchema, slots: list[str
             continue
 
         table, column = _split(reference)
-        found = schema.find_table(table)
+        found = schema.find_table(tables.get(table, table))
         if table not in slots or found is None or found.find_column(column) is None:
             return reference
 
@@ -202,14 +245,18 @@ def _build_filters(view: ViewDefinition, parameters: Mapping[str, object] | None
 
 
 def _build_joins(
-    view: ViewDefinition, schema: AuditfileSchema, rows: Callable[[str], Iterable[AuditfileRow]], resolve: Callable[[str], _Ref],
+    view: ViewDefinition,
+    schema: AuditfileSchema,
+    rows: Callable[[str], Iterable[AuditfileRow]],
+    tables: dict[str, str],
+    resolve: Callable[[str], _Ref],
     diagnostics: DiagnosticCollector,
 ) -> list[Callable[[Input], AuditfileRow | None]]:
     # One index by id over every table between the source and its joined ancestors.
     ancestor_tables: list[str] = []
     for join in view.joins:
         if not join.on:
-            for table in _ancestor_path(schema, view.source, join.table) or []:
+            for table in _ancestor_path(schema, view.source, tables[join.table]) or []:
                 if table not in ancestor_tables:
                     ancestor_tables.append(table)
 
@@ -222,7 +269,7 @@ def _build_joins(
     for join in view.joins:
         if not join.on:
 
-            def ancestor(row_input: Input, table: str = join.table) -> AuditfileRow | None:
+            def ancestor(row_input: Input, table: str = tables[join.table]) -> AuditfileRow | None:
                 source = row_input[0]
                 row = by_id.get(source.parent_id) if source is not None and source.parent_id is not None else None
                 while row is not None:
@@ -240,7 +287,7 @@ def _build_joins(
         right = [resolve(c.right) for c in join.on]
         index: dict[str, AuditfileRow] = {}
         width = max(r.slot for r in right) + 1
-        for row in rows(join.table):
+        for row in rows(tables[join.table]):
             cells: Input = [None] * width
             cells[right[0].slot] = row
             key = _key(right, cells)
@@ -383,29 +430,49 @@ def _compare(a: object, b: object) -> int:
 
 
 class _Expression:
-    def __init__(self, value: ViewValue, resolve: Callable[[str], _Ref]) -> None:
-        if value.operator not in ("column", "only", "signed"):
-            raise NotImplementedError(f"View value operator '{value.operator}' is not supported.")
+    def __init__(self, value: ViewValue, resolve: Callable[[str], _Ref], column_values: Callable[[str], Iterable[object]]) -> None:
 
         self._value = value
         self._column = resolve(value.column)
         self._by = None if value.by is None else resolve(value.by)
+        self._pseudonyms: dict[str, str] | None = None
+        if value.operator is ViewOperator.PSEUDONYM:
+            # Numbered over the whole table, so a placeholder does not depend on filters or on the view.
+            self._pseudonyms = {}
+            for cell in column_values(value.column):
+                self._pseudonym(cell)
 
     @property
     def type(self) -> ColumnType:
-        return self._column.column.type
+        return self._column.column.type if self._pseudonyms is None else ColumnType.STRING
 
     def evaluate(self, row_input: Input) -> object:
         cell = self._column.get(row_input)
-        if self._value.operator == "column" or cell is None:
+        if self._value.operator is ViewOperator.COLUMN or cell is None:
             return cell
+
+        if self._pseudonyms is not None:
+            return self._pseudonym(cell)
 
         by = self._by.get(row_input) if self._by is not None else None
         listed = by is not None and to_text(by) in self._value.codes
-        if self._value.operator == "only":
+        if self._value.operator is ViewOperator.ONLY:
             return cell if listed else None
 
         return _negate(cell) if listed else cell
+
+    def _pseudonym(self, cell: object) -> object:
+        text = "" if cell is None else to_text(cell)
+        if text == "":
+            return cell
+
+        assert self._pseudonyms is not None
+        pseudonym = self._pseudonyms.get(text)
+        if pseudonym is None:
+            pseudonym = f"{self._value.prefix}-{len(self._pseudonyms) + 1}"
+            self._pseudonyms[text] = pseudonym
+
+        return pseudonym
 
 
 def _negate(value: object) -> object:
@@ -421,8 +488,6 @@ def _negate(value: object) -> object:
 class _Aggregator:
     def __init__(self, column: ViewColumn, expression: _Expression | None) -> None:
         self._kind = column.aggregate
-        if self._kind not in ("sum", "count", "min", "max"):
-            raise NotImplementedError(f"View aggregate '{self._kind}' is not supported.")
 
         self._count_rows = expression is None
         self._decimal = expression is not None and expression.type is ColumnType.DECIMAL
@@ -432,10 +497,10 @@ class _Aggregator:
 
     @property
     def result(self) -> object:
-        if self._kind == "count":
+        if self._kind is ViewAggregate.COUNT:
             return self._count
 
-        if self._kind == "sum":
+        if self._kind is ViewAggregate.SUM:
             return self._sum if self._decimal else int(self._sum)
 
         return self._extreme
@@ -445,12 +510,12 @@ class _Aggregator:
             return
 
         self._count += 1
-        if self._kind == "sum":
+        if self._kind is ViewAggregate.SUM:
             self._decimal |= isinstance(value, Decimal)
             self._sum = add(self._sum, value if isinstance(value, Decimal) else Decimal(int(value)))  # type: ignore[arg-type]
-        elif self._kind == "min":
+        elif self._kind is ViewAggregate.MIN:
             if self._extreme is None or _compare(value, self._extreme) < 0:
                 self._extreme = value
-        elif self._kind == "max":
+        elif self._kind is ViewAggregate.MAX:
             if self._extreme is None or _compare(value, self._extreme) > 0:
                 self._extreme = value

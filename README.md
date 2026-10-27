@@ -18,10 +18,49 @@ for diagnostic in report.diagnostics:
     print(diagnostic)
 
 for line in sink.rows("tr_line"):
-    print(line["acc_id"], line["amnt"], line["amnt_tp"])
+    print(line.get_string("acc_id"), line.get_decimal("amnt"), line.get_string("amnt_tp"))
 ```
 
+Rows have typed accessors (`get_string`, `get_decimal`, `get_integer`, `get_date`, `get_datetime`, `get_time`, `get_boolean`)
+that check the column type and name the problem; `"amnt" in row` tells whether a column exists in this version. `get_decimal`
+also reads an integer column, since a column can be integer in one version and decimal in another. In a loop over many rows,
+look the column up once (`table.find_column("amnt")`) and pass it instead of the name.
+
+Values are read in XSD notation only: a date-time such as `03/01/2017 10:00:00` is refused (XAF-S004) rather than guessed.
+
 No dependencies: XML parsing uses the standard library's expat parser, XSD validation is built in.
+
+## pandas and polars
+
+``pip install xml-auditfile[pandas]`` or ``xml-auditfile[polars]`` adds DataFrames; the reader itself still needs
+nothing else.
+
+```python
+lines = sink.to_pandas("tr_line")                       # index _id, column _parent_id, then the table columns
+transactions = sink.to_pandas("transaction")
+lines = lines.merge(transactions, left_on="_parent_id", right_index=True, suffixes=("", "_transaction"))
+
+ledger = sink.run(AuditfileVersion.Financial.V3_2.find_view("ledger_pseudonymized")).to_pandas()
+ledger.groupby("account")["amount"].sum()
+```
+
+Strings, integers and booleans get nullable pandas types (``string``, ``Int64``, ``boolean``), dates and date-times
+``datetime64`` (date-times in UTC when the file gives a time zone), times stay ``datetime.time``. Amounts stay exact
+``Decimal`` objects, so sums are exact; ``to_pandas(..., decimals="float")`` gives ``float64`` for speed.
+``ViewResult.to_pandas(labels=TextLanguage.DUTCH)`` names the columns by their labels (``Bedrag``) instead of their names.
+
+```python
+lines = sink.to_polars("tr_line")                       # columns _id and _parent_id, then the table columns
+transactions = sink.to_polars("transaction")
+lines = lines.join(transactions, left_on="_parent_id", right_on="_id", how="left", suffix="_transaction")
+
+ledger = sink.run(AuditfileVersion.Financial.V3_2.find_view("ledger_pseudonymized")).to_polars()
+ledger.group_by("account").agg(pl.col("amount").sum())
+```
+
+polars has no index, so ``_id`` is the first column. Every column gets the polars type of its column type (``String``,
+``Int64``, ``Boolean``, ``Date``, ``Datetime`` in UTC when the file gives a time zone, ``Time``). Amounts get an exact
+``Decimal`` type with the largest scale in the column, so sums are exact; ``decimals="float"`` gives ``Float64``.
 
 ## What it does
 
@@ -41,10 +80,11 @@ No dependencies: XML parsing uses the standard library's expat parser, XSD valid
 | Call | Use |
 | ---- | --- |
 | `Auditfile.read(source, sink, options)` | Read into a sink: `MemorySink` or your own sink |
-| `Auditfile.validate(source, options)` | Validate completely without storing anything |
+| `Auditfile.validate(source, options)` | Validate without storing anything; `mode=ReadMode.UNVERIFIED` skips the XSD |
 | `Auditfile.scan(source, options)` | Version, XSD validation and row counts only |
-| `Auditfile.open(source, options).read_rows()` | Stream rows yourself |
+| `Auditfile.open(source, options).read_rows()` | Stream rows yourself; the rows can be iterated once |
 | `AuditfileVersion.Financial.V3_2` | Manifest, XSD, definitions, dialects and views of a version |
+| `Auditfile.dialects.add(version, json)` / `Auditfile.views.add(json)` | Add your own dialects and views next to the built-in ones (see below) |
 | `schema.to_json()` / `AuditfileSchema.from_json()` | Store and restore the schema of an import |
 
 Sources: the reader never opens files; you supply binary streams (anything with `read(n)` returning bytes) or bytes.
@@ -57,10 +97,46 @@ Sources: the reader never opens files; you supply binary streams (anything with 
 | `AuditfileSource.from_streams((name, stream), ...)` | Same, for the parts of a split audit file |
 
 Options are a frozen dataclass: `ReadOptions(version=..., mode=ReadMode.UNVERIFIED, use_resolver=..., xsd=...,
-apply_dialects=..., batch_size=..., language=TextLanguage.ENGLISH, max_diagnostics=..., max_depth=..., on_progress=...)`.
+apply_dialects=..., batch_size=..., language=TextLanguage.ENGLISH, max_diagnostics=..., max_depth=...,
+max_characters_in_document=..., max_value_length=..., on_progress=..., cancel=threading.Event())`. Values out of range are
+refused with a `ValueError`. Set the `cancel` event from another thread to stop reading, in the scan phase as well as
+the load phase; the call then raises `ReadCancelledError`. When a sink fails and its `abort` fails too, the read raises a
+`SinkAbortError` holding both errors (`error`, `abort_error`).
 
 A sink is any object with `begin(context)`, `write(table, rows)`, `complete(report)` and `abort(report)` (the `Sink`
 protocol). Set `capabilities = SinkCapabilities.NEEDS_ROW_COUNTS` to get row counts before the first row.
+
+## Custom dialects and views
+
+Dialects and views come from auditfile-spec and are built into the package. You can add your own at runtime, in the same
+format as `dialects.json` and `views/<type>.json` of the spec, without a fork or a custom build. Pass JSON text
+(`str` or UTF-8 `bytes`) or the parsed `dict`; the reader opens no files, so read them yourself.
+
+```python
+from pathlib import Path
+from xml_auditfile import Auditfile, AuditfileVersion
+
+# {"formatVersion": 1, "dialects": [{"name": "my-package", "match": {...}, "corrections": [...]}]}
+Auditfile.dialects.add(AuditfileVersion.Financial.V3_2, Path("dialects.json").read_text("utf-8"))   # or "xaf/3.2"
+
+# {"formatVersion": 1, "type": "xaf", "views": [{"name": "lines_per_account", ...}]}
+Auditfile.views.add(Path("views.json").read_bytes())
+
+report = Auditfile.read(source, sink)           # recognizes and applies the added dialect
+result = sink.run(sink.schema.version.find_view("lines_per_account"))
+```
+
+- Added definitions come after the built-in ones in `version.dialects` and `version.views`, so `find_view`, version
+  resolution and dialect corrections use them like the built-in ones. A view is added for every version of its `type`;
+  whether it fits a version is decided when it runs (XAF-Q001), as for built-in views. `apply_dialects=False` ignores
+  added dialects too.
+- A file is checked when it is added and refused as a whole when anything is wrong (`JsonFormatError`, a `ValueError`):
+  invalid JSON, a `formatVersion` other than 1, an unknown dialect action, view aggregate or operator, or a correction
+  `code` that is not a dialect diagnostic (XAF-C001–C003). An unknown audit file type or version, or a name the version
+  or type already has, raises a `ValueError`. Built-in definitions cannot be replaced or removed.
+- `Auditfile.dialects.remove(version, name)` and `Auditfile.views.remove(type, name)` remove one added definition;
+  `clear()` removes all of them. The registries are thread-safe and shared by every read in the process; a read that
+  has started keeps the dialects it found.
 
 ## Values
 
@@ -81,9 +157,31 @@ The reader is built for files from untrusted sources:
 - DTDs are refused, so no entity can be declared or expanded and nothing external is loaded (XXE, billion laughs).
 - XSD imports resolve only to the definitions embedded in the package; never to disk or network.
 - Nesting deeper than `max_depth` (64) stops reading; the root element must appear within the first megabyte.
-- Memory does not grow with the file: only open elements, key values and unresolved references
-  (capped per reference) are kept, and diagnostics are capped at `max_diagnostics`.
+- Memory grows with the number of keys (accounts, customers and suppliers, ...), not with the number of lines:
+  only open elements, key values, unresolved references (at most 100,000 per reference, XAF-R017 beyond that) and
+  the totals of transactions being read are kept, and the diagnostics list is capped at `max_diagnostics`.
 - Text streams are refused (their encoding is unknown); a stream you pass with `from_stream` is never closed.
+
+## Diagnostics
+
+Every finding is a diagnostic with a stable code from `diagnostics.json` of auditfile-spec. The report lists at most
+`max_diagnostics` (default 1000), followed by XAF-X900 when more were found. A full list makes room for errors by
+leaving out infos and warnings, and fatal diagnostics are always included. `is_valid`, `has_errors`, `has_fatal` and
+`count(severity)` count every diagnostic, also the ones left out; `is_truncated` says whether some were.
+
+| Layer | Codes this reader reports |
+| ----- | ------------------------- |
+| XML | X001–X004 (X004 also for a part of a split file in another encoding than the first part), X900 |
+| Version | V001–V006 |
+| Structure | S001–S005, S008; S006 in unverified mode (in verified mode the XSD reports a missing field as D001) |
+| XSD | D001, D002 |
+| Rules | R001–R004, R017 |
+| Dialect | C001–C003, when a dialect applies |
+| Views | Q001, Q002 |
+
+Defined in the spec but not checked yet: S007 and S009 (in verified mode the XSD reports too many occurrences and
+values outside a code list as D001), R005–R016 (ascending numbers, periods, eleven test, IBAN, personal data),
+X005 (the XML parser reports an invalid character as X001) and E001–E004 (envelopes).
 
 ## XSD validation
 
@@ -98,17 +196,17 @@ Like the .NET reader, identity constraints follow XPath 1.0: an unprefixed step 
 | Path | Contents |
 | ---- | -------- |
 | `src/xml_auditfile/` | The reader; `memory.py` holds `MemorySink`, `xsd/` the XSD validator |
-| `tests/` | Tests (pytest), using the official XAF 3.2 test file from auditfile-spec |
-| `samples/read_to_memory.py` | Read a file and print tables, a row with definitions, views and diagnostics |
-| `samples/validate.py` | Validate a file; exit code 0 when valid |
+| `tests/` | Tests (pytest), using the XAF 3.2 sample in `tests/data/xaf-3.2-sample.xaf` (two intended findings: XAF-R001, XAF-R003) |
 | `spec.lock.json` | The pinned auditfile-spec release |
-| `tools/` | `fetch-spec.ps1` (fetches the pinned spec into `spec/`) and `embed_spec.py` |
+| `tools/` | `fetch-spec.ps1` (copies `generated/` of the pinned spec into `spec/generated/`) and `embed_spec.py` |
+
+Example programs live in [auditfile-py-samples](https://github.com/XML-auditfile/auditfile-py-samples).
 
 ## Definitions
 
 Everything in `generated/` of a pinned auditfile-spec release is embedded in the package as `xml_auditfile/_spec/`.
-The spec is not committed: `spec.lock.json` pins a commit, `tools/fetch-spec.ps1` fetches exactly that commit into
-`spec/` (git-ignored), and `tools/embed_spec.py` copies it into the package before testing and building.
+The spec is not committed: `spec.lock.json` pins a commit, `tools/fetch-spec.ps1` copies only
+`generated/` of that commit into `spec/generated/` (git-ignored; a plain folder, not a git checkout), and `tools/embed_spec.py` copies it into the package before testing and building.
 
 ```
 pwsh tools/fetch-spec.ps1        # after cloning and whenever spec.lock.json changes

@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from .versions import AuditfileVersion
 
 
+_FORMAT_VERSION = 1
+"""Format version written by AuditfileSchema.to_json; from_json refuses any other."""
+
+
 class VersionSource(str, Enum):
     """How the version of an import was determined."""
 
@@ -155,7 +159,7 @@ class AuditfileSchema:
         """Serializes the schema to compact JSON, e.g. for storage in a database."""
         return json.dumps(
             {
-                "formatVersion": 1,
+                "formatVersion": _FORMAT_VERSION,
                 "version": self.version_key,
                 "namespace": self.namespace,
                 "source": self.source.value,
@@ -198,13 +202,21 @@ class AuditfileSchema:
 
     @staticmethod
     def from_json(text: str) -> AuditfileSchema:
-        """Reads a schema written by :meth:`to_json`. :raises ValueError: The JSON is not a valid schema."""
+        """
+        Reads a schema written by :meth:`to_json`.
+
+        :raises ValueError: The JSON is not a valid schema, or uses a format version, column type or version source this reader does not know.
+        """
         from .versions import AuditfileVersion
 
         if not isinstance(text, str):
             raise TypeError("json must be a str.")
 
         root = j.parse_object(text, "Schema JSON")
+        if root.get("formatVersion") != _FORMAT_VERSION or isinstance(root.get("formatVersion"), bool):
+            found = root.get("formatVersion", "(missing)")
+            raise j.JsonFormatError(f"Schema JSON format version {found} is not supported; this reader reads format version {_FORMAT_VERSION}.")
+
         version_key = j.string(root, "version")
         version = AuditfileVersion.find(version_key)
         definitions: Mapping[str, ElementDefinition] = version.definitions if version is not None else {}
@@ -237,7 +249,7 @@ class AuditfileSchema:
         try:
             source = VersionSource(j.string(root, "source"))
         except ValueError:
-            source = VersionSource.OFFICIAL
+            raise j.JsonFormatError(f"Unknown version source '{j.string(root, 'source')}' in schema JSON.") from None
 
         return AuditfileSchema(
             version_key, j.string(root, "namespace"), source, j.optional_string(root, "dialect"), j.boolean(root, "hasRowCounts"), tables

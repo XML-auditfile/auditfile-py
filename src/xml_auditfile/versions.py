@@ -10,8 +10,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from . import _json as j
+from . import custom
 from ._resources import exists, read_bytes, read_json
-from .definitions import AuditfileManifest, Dialect, ElementDefinition, ViewDefinition
+from .definitions import AuditfileManifest, Dialect, DialectAction, ElementDefinition, ViewDefinition
 from .diagnostics import NO_LOCATION, DiagnosticCollector
 from .schema import VersionSource
 
@@ -89,14 +90,25 @@ class AuditfileVersion:
         entries = (ElementDefinition(e) for e in j.objects(read_json(f"{self.folder}/definition.json"), "entries"))
         return MappingProxyType({d.key: d for d in entries})
 
-    @cached_property
+    @property
     def dialects(self) -> tuple[Dialect, ...]:
-        """Known dialects of this version."""
+        """Known dialects of this version: the built-in ones, then those added with ``Auditfile.dialects.add``."""
+        return self._dialects + custom.dialects._for(self.key)
+
+    @property
+    def views(self) -> tuple[ViewDefinition, ...]:
+        """
+        Views of this audit file type, e.g. the trial balance: the built-in ones, then those added with
+        ``Auditfile.views.add``. Shared by all versions of the type.
+        """
+        return self._views + custom.views._for(self.type)
+
+    @cached_property
+    def _dialects(self) -> tuple[Dialect, ...]:
         return tuple(Dialect(d) for d in j.objects(read_json(f"{self.folder}/dialects.json"), "dialects"))
 
     @cached_property
-    def views(self) -> tuple[ViewDefinition, ...]:
-        """Views of this audit file type, e.g. the trial balance. Shared by all versions of the type."""
+    def _views(self) -> tuple[ViewDefinition, ...]:
         return ViewDefinition._load(self.type)
 
     def find_view(self, name: str) -> ViewDefinition | None:
@@ -207,6 +219,17 @@ class Resolution:
     def needs_mapping(self) -> bool:
         return self.file_namespace != self.version.namespace
 
+    def use_software(self, software: str, apply_dialects: bool) -> bool:
+        """
+        Recognizes a dialect by the software description in the header, when none was recognized by namespace.
+        Returns True when a dialect was found.
+        """
+        if self.dialect is not None or not apply_dialects:
+            return False
+
+        self.dialect = next((d for d in self.version.dialects if d.software_description == software), None)
+        return self.dialect is not None
+
 
 def resolve_version(root_name: str, file_namespace: str, options: ReadOptions, diagnostics: DiagnosticCollector) -> Resolution | None:
     """
@@ -228,7 +251,7 @@ def resolve_version(root_name: str, file_namespace: str, options: ReadOptions, d
 
     if resolution.dialect is not None:
         replace = next(
-            (c for c in resolution.dialect.corrections if c.action == "replaceNamespace" and c.from_ == file_namespace), None
+            (c for c in resolution.dialect.corrections if c.action is DialectAction.REPLACE_NAMESPACE and c.from_ == file_namespace), None
         )
         if replace is not None:
             diagnostics.add(replace.code, NO_LOCATION, **{"from": file_namespace, "to": version.namespace})

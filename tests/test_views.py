@@ -1,22 +1,25 @@
+import datetime as dt
 from decimal import Decimal
 
 import pytest
 
 from xml_auditfile import Auditfile, AuditfileSource, AuditfileVersion, MemorySink
 
-# Two journals, two periods; account 1000 is debited 350 and credited 100.
+# Two journals, two periods; account 1000 is debited 350 and credited 100. Two lines name customer C1 and share
+# the description "Verkoop"; one line names supplier C2.
 XAF = """<?xml version="1.0" encoding="UTF-8"?>
 <auditfile xmlns="http://www.auditfiles.nl/XAF/3.2"><header><fiscalYear>2025</fiscalYear><startDate>2025-01-01</startDate><endDate>2025-12-31</endDate><curCode>EUR</curCode><dateCreated>2026-01-15</dateCreated></header>
 <company><companyName>Voorbeeld BV</companyName><taxRegistrationCountry>NL</taxRegistrationCountry><taxRegIdent>NL001</taxRegIdent>
+<customersSuppliers><customerSupplier><custSupID>C1</custSupID><custSupName>Jansen BV</custSupName></customerSupplier><customerSupplier><custSupID>C2</custSupID><custSupName>Verhuur BV</custSupName></customerSupplier></customersSuppliers>
 <generalLedger><ledgerAccount><accID>1000</accID><accDesc>Kas</accDesc><accTp>B</accTp></ledgerAccount><ledgerAccount><accID>4000</accID><accDesc>Huur</accDesc><accTp>P</accTp></ledgerAccount><ledgerAccount><accID>8000</accID><accDesc>Omzet</accDesc><accTp>P</accTp></ledgerAccount></generalLedger>
 <periods><period><periodNumber>1</periodNumber><startDatePeriod>2025-01-01</startDatePeriod><endDatePeriod>2025-06-30</endDatePeriod></period><period><periodNumber>2</periodNumber><startDatePeriod>2025-07-01</startDatePeriod><endDatePeriod>2025-12-31</endDatePeriod></period></periods>
 <transactions><linesCount>6</linesCount><totalDebit>450.00</totalDebit><totalCredit>450.00</totalCredit>
 <journal><jrnID>V</jrnID><desc>Verkoop</desc>
-<transaction><nr>1</nr><periodNumber>1</periodNumber><trDt>2025-03-01</trDt><trLine><nr>1</nr><accID>1000</accID><docRef>F1</docRef><effDate>2025-03-01</effDate><amnt>100.00</amnt><amntTp>D</amntTp></trLine><trLine><nr>2</nr><accID>8000</accID><docRef>F1</docRef><effDate>2025-03-01</effDate><amnt>100.00</amnt><amntTp>C</amntTp></trLine></transaction>
-<transaction><nr>2</nr><periodNumber>2</periodNumber><trDt>2025-09-01</trDt><trLine><nr>1</nr><accID>1000</accID><docRef>F2</docRef><effDate>2025-09-01</effDate><amnt>250.00</amnt><amntTp>D</amntTp></trLine><trLine><nr>2</nr><accID>8000</accID><docRef>F2</docRef><effDate>2025-09-01</effDate><amnt>250.00</amnt><amntTp>C</amntTp></trLine></transaction>
+<transaction><nr>1</nr><periodNumber>1</periodNumber><trDt>2025-03-01</trDt><trLine><nr>1</nr><accID>1000</accID><docRef>F1</docRef><effDate>2025-03-01</effDate><desc>Verkoop</desc><amnt>100.00</amnt><amntTp>D</amntTp><custSupID>C1</custSupID></trLine><trLine><nr>2</nr><accID>8000</accID><docRef>F1</docRef><effDate>2025-03-01</effDate><amnt>100.00</amnt><amntTp>C</amntTp></trLine></transaction>
+<transaction><nr>2</nr><periodNumber>2</periodNumber><trDt>2025-09-01</trDt><trLine><nr>1</nr><accID>1000</accID><docRef>F2</docRef><effDate>2025-09-01</effDate><desc>Verkoop</desc><amnt>250.00</amnt><amntTp>D</amntTp><custSupID>C1</custSupID></trLine><trLine><nr>2</nr><accID>8000</accID><docRef>F2</docRef><effDate>2025-09-01</effDate><amnt>250.00</amnt><amntTp>C</amntTp></trLine></transaction>
 </journal>
 <journal><jrnID>M</jrnID><desc>Memoriaal</desc>
-<transaction><nr>3</nr><periodNumber>2</periodNumber><trDt>2025-10-01</trDt><trLine><nr>1</nr><accID>4000</accID><docRef>H1</docRef><effDate>2025-10-01</effDate><amnt>100.00</amnt><amntTp>D</amntTp></trLine><trLine><nr>2</nr><accID>1000</accID><docRef>H1</docRef><effDate>2025-10-01</effDate><amnt>100.00</amnt><amntTp>C</amntTp></trLine></transaction>
+<transaction><nr>3</nr><periodNumber>2</periodNumber><trDt>2025-10-01</trDt><trLine><nr>1</nr><accID>4000</accID><docRef>H1</docRef><effDate>2025-10-01</effDate><desc>Huur oktober</desc><amnt>100.00</amnt><amntTp>D</amntTp><custSupID>C2</custSupID></trLine><trLine><nr>2</nr><accID>1000</accID><docRef>H1</docRef><effDate>2025-10-01</effDate><amnt>100.00</amnt><amntTp>C</amntTp></trLine></transaction>
 </journal></transactions></company></auditfile>"""
 
 
@@ -57,6 +60,37 @@ def test_ancestor_joins_reach_through_the_parent_chain(sink):
     assert memoriaal[0] == "M"
     assert memoriaal[3] == 2
     assert str(memoriaal[6]) == "0.00"
+
+
+def test_ledger_shows_names_and_a_signed_amount_in_file_order(sink):
+    result = sink.run(view("ledger"))
+
+    assert result.is_available
+    assert result.diagnostics == ()
+    assert len(result.rows) == 6
+    assert result.rows[0] == (
+        "V", "Verkoop", "1", None, dt.date(2025, 3, 1), 1, "1", "1000", "Kas", "C1", "Jansen BV", "Verkoop", "F1", Decimal("100.00"),
+    )
+    assert (*result.rows[1][7:11], result.rows[1][13]) == ("8000", "Omzet", None, None, Decimal("-100.00"))
+    assert [r[0] for r in result.rows] == ["V", "V", "V", "V", "M", "M"]
+    assert sum(r[13] for r in result.rows) == 0
+
+
+def test_pseudonymized_ledger_replaces_descriptions_and_names(sink):
+    result = sink.run(view("ledger_pseudonymized"))
+
+    assert result.rows[0] == (
+        "V", "JRN-1", "1", None, dt.date(2025, 3, 1), 1, "1", "1000", "ACC-1", "C1", "REL-1", "DESC-1", "F1", Decimal("100.00"),
+    )
+    assert result.rows[1][8] == "ACC-3"
+    assert result.rows[2][11] == "DESC-1"
+    assert tuple(result.rows[4][i] for i in (1, 8, 10, 11)) == ("JRN-2", "ACC-2", "REL-2", "DESC-2")
+
+
+def test_pseudonyms_do_not_depend_on_filters(sink):
+    result = sink.run(view("ledger_pseudonymized"), {"journal": "M"})
+
+    assert [r[8] for r in result.rows] == ["ACC-2", "ACC-1"]
 
 
 def test_unknown_parameter_is_rejected(sink):

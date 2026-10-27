@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from . import _json as j
 from ._resources import exists, read_json
@@ -51,6 +51,58 @@ class LocalizedText:
     @staticmethod
     def _from(json: dict[str, Any] | None) -> LocalizedText | None:
         return None if json is None else LocalizedText(j.optional_string(json, "nl"), j.optional_string(json, "en"))
+
+
+class DialectAction(str, Enum):
+    """What a dialect correction does. Unknown actions are refused when the definitions are loaded."""
+
+    REPLACE_NAMESPACE = "replaceNamespace"
+    """Read a file in ``from_`` as the official namespace."""
+
+    DECIMAL_COMMA = "decimalComma"
+    """A decimal comma becomes a point."""
+
+    DATE_FROM_DATE_TIME = "dateFromDateTime"
+    """The time is removed from a date."""
+
+
+class ViewAggregate(str, Enum):
+    """How a view column aggregates its values. Unknown aggregates are refused when the definitions are loaded."""
+
+    SUM = "sum"
+    COUNT = "count"
+    MIN = "min"
+    MAX = "max"
+
+
+class ViewOperator(str, Enum):
+    """How a view column gets its value from an input row. Unknown operators are refused when the definitions are loaded."""
+
+    COLUMN = "column"
+    """The value of the column."""
+
+    ONLY = "only"
+    """The value when ``by`` is one of the codes, otherwise None."""
+
+    SIGNED = "signed"
+    """The value, negated when ``by`` is one of the codes."""
+
+    PSEUDONYM = "pseudonym"
+    """
+    ``prefix``-n instead of the value, where n numbers the distinct values of the column in the order they first occur
+    in its table. None and empty values stay as they are.
+    """
+
+
+_E = TypeVar("_E", bound=Enum)
+
+
+def _name(enum: type[_E], value: str, what: str) -> _E:
+    """A name from the JSON definitions, checked against the known names."""
+    try:
+        return enum(value)
+    except ValueError:
+        raise j.JsonFormatError(f"Embedded JSON: unknown {what} '{value}'.") from None
 
 
 class ColumnType(str, Enum):
@@ -203,8 +255,8 @@ class DialectCorrection:
     def __init__(self, json: dict[str, Any]) -> None:
         self.code = j.string(json, "code")
         """Diagnostic code reported when the correction is applied."""
-        self.action = j.string(json, "action")
-        """"replaceNamespace", "decimalComma" or "dateFromDateTime"."""
+        self.action = _name(DialectAction, j.string(json, "action"), "dialect action")
+        """What the correction does."""
         self.paths = tuple(j.strings(json, "paths"))
         """XML paths the correction applies to."""
         self.from_ = j.optional_string(json, "from")
@@ -268,7 +320,12 @@ class ViewJoin:
 
     def __init__(self, json: dict[str, Any]) -> None:
         self.table = j.string(json, "table")
-        """Table name."""
+        """Table name, as the view refers to it."""
+        self.alternatives: tuple[str, ...] = tuple(j.strings(json, "alternatives"))
+        """
+        Names of the same table in versions that call it differently: when a version lacks ``table``, the first
+        alternative it has is joined.
+        """
         conditions = []
         for pair in j.array(json, "on"):
             if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)):
@@ -296,12 +353,10 @@ class ViewParameter:
 class ViewValue:
     """How a view column gets its value from an input row."""
 
-    def __init__(self, operator: str, column: str, by: str | None, codes: Iterable[str]) -> None:
+    def __init__(self, operator: str, column: str, by: str | None, codes: Iterable[str], prefix: str | None = None) -> None:
         self.operator = operator
         """
-        "column": the value of `column`;
-        "only": the value when `by` is one of `codes`, otherwise None;
-        "signed": the value, negated when `by` is one of `codes`.
+        How the value is taken from ``column``.
         """
         self.column = column
         """The value column, as "table.column"."""
@@ -309,15 +364,21 @@ class ViewValue:
         """The column holding the code, as "table.column"."""
         self.codes: tuple[str, ...] = tuple(codes)
         """Codes for "only" (in) or "signed" (negative)."""
+        self.prefix = prefix
+        """Placeholder prefix for "pseudonym", e.g. "REL" for REL-1, REL-2, ..."""
 
     @staticmethod
     def _from(json: Any) -> ViewValue:
         if isinstance(json, str):
-            return ViewValue("column", json, None, ())
+            return ViewValue(ViewOperator.COLUMN, json, None, ())
 
         if isinstance(json, dict):
             return ViewValue(
-                j.string(json, "op"), j.string(json, "value"), j.optional_string(json, "by"), [*j.strings(json, "in"), *j.strings(json, "negative")]
+                _name(ViewOperator, j.string(json, "op"), "view value operator"),
+                j.string(json, "value"),
+                j.optional_string(json, "by"),
+                [*j.strings(json, "in"), *j.strings(json, "negative")],
+                j.optional_string(json, "prefix"),
             )
 
         raise j.JsonFormatError("Embedded JSON: invalid view column value.")
@@ -331,8 +392,9 @@ class ViewColumn:
         """Column name."""
         self.label = LocalizedText._from(j.obj(json, "label"))
         """Display name."""
-        self.aggregate = j.optional_string(json, "aggregate")
-        """"sum", "count", "min", "max", or None for a grouping column."""
+        aggregate = j.optional_string(json, "aggregate")
+        self.aggregate = None if aggregate is None else _name(ViewAggregate, aggregate, "view aggregate")
+        """The aggregate, or None for a grouping column."""
         self.value = ViewValue._from(json["value"]) if json.get("value") is not None else None
         """The value per input row; None for a row count."""
 
