@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Source documents must stay byte-exact (checksums).
+*.xsd -text
+*.XSD -text
+*.xaf -text
+*.XAF -text
+*.pdf binary
+*.PDF binary
+
+# Expected conformance output always uses LF.
+conformance/expected/** text eol=lf

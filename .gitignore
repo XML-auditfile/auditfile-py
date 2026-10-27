@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+spec/
+src/xml_auditfile/_spec/
+.DS_Store
+Thumbs.db

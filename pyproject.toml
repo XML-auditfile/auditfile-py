@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xml-auditfile"
+version = "0.1.0a0"
+description = "Streaming reader for Dutch tax audit files (XAF and related), following auditfile-spec."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "XML-auditfile" }]
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Accounting",
+    "Topic :: Text Processing :: Markup :: XML",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/XML-auditfile/auditfile-py"
+Specification = "https://github.com/XML-auditfile/auditfile-spec"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xml_auditfile"]
+# The embedded spec is generated (tools/embed_spec.py) and git-ignored, so include it explicitly.
+artifacts = ["src/xml_auditfile/_spec/**"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/xml_auditfile", "tests", "samples", "tools", "spec.lock.json", "README.md", "CHANGELOG.md", "LICENSE"]
+artifacts = ["src/xml_auditfile/_spec/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
