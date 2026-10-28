@@ -198,7 +198,7 @@ Like the .NET reader, identity constraints follow XPath 1.0: an unprefixed step 
 | `src/xml_auditfile/` | The reader; `memory.py` holds `MemorySink`, `xsd/` the XSD validator |
 | `tests/` | Tests (pytest), using the XAF 3.2 sample in `tests/data/xaf-3.2-sample.xaf` (two intended findings: XAF-R001, XAF-R003) |
 | `spec.lock.json` | The pinned auditfile-spec release |
-| `tools/` | `fetch-spec.ps1` (copies `generated/` of the pinned spec into `spec/generated/`) and `embed_spec.py` |
+| `tools/` | `fetch-spec.ps1` (copies `generated/` of the pinned spec into `spec/generated/`), `embed_spec.py` and `semver.ps1` (version checks of the release workflow) |
 
 Example programs live in [auditfile-py-samples](https://github.com/XML-auditfile/auditfile-py-samples).
 
@@ -216,6 +216,14 @@ pytest
 ```
 
 To use a local spec checkout instead: `SPEC_ROOT=../auditfile-spec python tools/embed_spec.py`.
+
+## Workflows
+
+| Workflow | What it does |
+| -------- | ------------ |
+| `ci.yml` | Push to main and pull requests: fetch the pinned spec, embed it, install, test on Python 3.10, 3.12 and 3.13, build the sdist and wheel and check them |
+| `release.yml` | Manual, with a version such as `1.0.1`. From `main` the version must be higher than every release; from `release/X.Y` (maintenance of an older line, e.g. a security fix `0.1.1` after `1.0.0`, branched off tag `0.1.0`) it must be in line X.Y and higher than the latest release in that line. Pre-releases are `-alpha.N`, `-beta.N` or `-rc.N`; the tag keeps the semantic version, the package gets the PEP 440 form (`1.1.0-beta.1` becomes `1.1.0b1`). Then it fetches and embeds the pinned spec, builds, tests the wheel, creates the tag and GitHub release, and publishes to PyPI through Trusted Publishing when the `PYPI_PUBLISH` variable is `true` (environment `pypi`) |
+| `dependabot.yml` | Weekly updates of pip packages and GitHub Actions |
 
 ## License
 
