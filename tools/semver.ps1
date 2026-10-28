@@ -64,8 +64,9 @@ function Get-HighestSemVer([string[]]$Versions) {
 # Checks a version to release against the existing tags and the branch it is released from:
 # - main: higher than every existing release;
 # - release/X.Y: in line X.Y and higher than the latest release in that line (maintenance of an older line).
+# With -Commit, that commit must also hold commits that the previous release does not; needs git and the history.
 # Throws when the version may not be released. Returns $true when it becomes GitHub's latest release.
-function Assert-ReleaseVersion([string]$Version, [string]$Ref, [string[]]$Tags) {
+function Assert-ReleaseVersion([string]$Version, [string]$Ref, [string[]]$Tags, [string]$Commit) {
     if (-not (Test-SemVer $Version)) {
         throw "'$Version' is not a semantic version without prefix (e.g. 1.0.1 or 1.1.0-beta.1)."
     }
@@ -88,6 +89,16 @@ function Assert-ReleaseVersion([string]$Version, [string]$Ref, [string[]]$Tags) 
 
     if ($previous -and (Compare-SemVer $Version $previous) -le 0) {
         throw "$Version must be higher than $previous, the latest of $scope."
+    }
+
+    if ($Commit -and $previous) {
+        $count = git rev-list --count "refs/tags/$previous..$Commit"
+        if ($LASTEXITCODE -ne 0) { throw "Could not count the commits since $previous." }
+        if ([int]$count -eq 0) {
+            throw "$Commit has no commits since $previous; there is nothing to release."
+        }
+
+        Write-Host "$count commit(s) since $previous."
     }
 
     # GitHub's "latest release" is the highest stable one; pre-releases never are.
