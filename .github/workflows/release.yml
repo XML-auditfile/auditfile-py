@@ -1,0 +1,135 @@
+name: Release
+
+# Run manually with the new version, e.g. 1.0.1 or 1.1.0-beta.1:
+# - from main: the version must be higher than every existing release;
+# - from release/X.Y (maintenance of an older line, e.g. a security fix 0.1.1 after 1.0.0):
+#   the version must be in line X.Y and higher than the latest release in that line.
+#   Branch release/X.Y off the tag of that line, e.g. git switch -c release/0.1 0.1.0.
+# Checks the version, fetches the auditfile-spec pinned in spec.lock.json, builds the sdist and wheel (with the
+# embedded spec), tests the wheel, creates the tag and GitHub release, and publishes to PyPI when the PYPI_PUBLISH
+# variable is "true".
+#
+# The tag is the semantic version, as in the other auditfile repositories; the package gets its PEP 440 form.
+# Pre-releases are limited to -alpha.N, -beta.N and -rc.N (1.1.0-beta.1 becomes 1.1.0b1), because only those keep
+# the same order in both schemes. Build metadata (+...) is not allowed: PyPI refuses local versions.
+#
+# Publishing uses PyPI Trusted Publishing: no token is stored. GitHub gives this job an OIDC token, and PyPI accepts
+# it only for the trusted publisher on the project (this repository, this workflow file, the environment "pypi").
+# PyPI adds attestations that link the files to this run and commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version (semver without prefix, e.g. 1.0.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write # tag and GitHub release
+  id-token: write # OIDC token for PyPI Trusted Publishing and attestations
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Protection rules (e.g. a required reviewer) are set on this environment in the repository settings.
+    environment: pypi
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags, for the version check
+
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          . ./tools/semver.ps1
+          $isLatest = Assert-ReleaseVersion $env:VERSION $env:GITHUB_REF @(git tag --list)
+          if ($env:VERSION -notmatch '^(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.(0|[1-9]\d*))?$') {
+            throw "$env:VERSION has no PEP 440 form with the same order: use X.Y.Z or a pre-release X.Y.Z-alpha.N, -beta.N or -rc.N."
+          }
+          $package = if ($Matches[2]) { $Matches[1] + @{ alpha = 'a'; beta = 'b'; rc = 'rc' }[$Matches[2]] + $Matches[3] } else { $Matches[1] }
+          Write-Host "Package version: $package."
+          "latest=$($isLatest.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "package=$package" >> $env:GITHUB_OUTPUT
+
+      # No pip cache: a cache entry can come from another branch, and a release must not depend on it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Fetch auditfile-spec (spec.lock.json)
+        id: spec
+        shell: pwsh
+        run: |
+          ./tools/fetch-spec.ps1
+          $lock = Get-Content spec.lock.json -Raw | ConvertFrom-Json
+          if (-not $lock.tag) {
+            Write-Host "::warning::spec.lock.json pins auditfile-spec commit $($lock.commit) without a release tag."
+          }
+          $label = if ($lock.tag) { $lock.tag } else { $lock.commit.Substring(0, 7) }
+          "label=$label" >> $env:GITHUB_OUTPUT
+          "url=https://github.com/$($lock.repository)/tree/$($lock.commit)" >> $env:GITHUB_OUTPUT
+
+      - name: Embed the spec
+        run: python tools/embed_spec.py
+
+      - name: Set version
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          sed -i -E "s/^version = \".*\"$/version = \"$PACKAGE_VERSION\"/" pyproject.toml
+          grep -qx "version = \"$PACKAGE_VERSION\"" pyproject.toml
+
+      - name: Install build tools
+        run: python -m pip install build twine
+
+      - name: Build
+        run: python -m build --outdir artifacts
+
+      - name: Check package
+        run: twine check --strict artifacts/*
+
+      # Tests the built wheel, not the source tree: src/ is not on the path, so the tests import the installed package.
+      - name: Test
+        run: |
+          wheel=$(ls artifacts/*.whl)
+          python -m pip install "$wheel[test]"
+          pytest
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPEC_LABEL: ${{ steps.spec.outputs.label }}
+          SPEC_URL: ${{ steps.spec.outputs.url }}
+          LATEST: ${{ steps.version.outputs.latest }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          prerelease=""
+          if [[ "$VERSION" == *-* ]]; then prerelease="--prerelease"; fi
+          gh release create "$VERSION" artifacts/*.whl artifacts/*.tar.gz \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "Built with auditfile-spec [$SPEC_LABEL]($SPEC_URL). Python package version $PACKAGE_VERSION." \
+            --generate-notes \
+            --latest="$LATEST" \
+            $prerelease
+
+      # Last, because a PyPI version cannot be used again, not even after it was deleted.
+      - name: Publish to PyPI
+        if: vars.PYPI_PUBLISH == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: artifacts/
+
+      - name: Summary
+        if: vars.PYPI_PUBLISH == 'true'
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: echo "### xml-auditfile $PACKAGE_VERSION is published on PyPI (https://pypi.org/project/xml-auditfile/$PACKAGE_VERSION/)" >> "$GITHUB_STEP_SUMMARY"

@@ -42,6 +42,13 @@ jobs:
       - name: Test
         run: pytest
 
+      # Builds the sdist and wheel (with the embedded spec) as the release does, and checks their metadata.
+      - name: Build
+        run: |
+          python -m pip install build twine
+          python -m build --outdir artifacts
+          twine check --strict artifacts/*
+
   # The one check the branch rules require, whatever the jobs above: it fails when any of them did not succeed.
   ci-passed:
     if: always()
