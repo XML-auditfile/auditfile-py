@@ -1,4 +1,4 @@
-# auditfile-spec is not a package; spec.lock.json pins it.
+# auditfile-spec is not a package; .github/workflows/spec-update.yml keeps spec.lock.json up to date.
 version: 2
 updates:
   - package-ecosystem: pip

@@ -1,0 +1,125 @@
+name: auditfile-spec update
+
+# Daily: looks for an auditfile-spec release higher than the one in spec.lock.json.
+# When found, updates the lock, tests against it, and opens a pull request with the result.
+# A pull request opened with GITHUB_TOKEN does not trigger CI by itself; this workflow starts CI on the branch
+# (workflow_dispatch is the one event GITHUB_TOKEN may trigger), so the required check runs. The test result is also
+# in the PR body.
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # every day 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write # start CI on the new branch
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: spec-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Look for a newer release
+        id: check
+        shell: pwsh
+        run: |
+          . ./tools/semver.ps1
+          $lock = Get-Content spec.lock.json -Raw | ConvertFrom-Json
+          $tags = @(gh release list --repo $lock.repository --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')
+          if ($LASTEXITCODE -ne 0) { throw "Could not list the releases of $($lock.repository)." }
+
+          # Release tags may carry a 'v' prefix; compare without it.
+          $byVersion = @{}
+          foreach ($tag in $tags) { $byVersion[($tag -replace '^v', '')] = $tag }
+          $latest = Get-HighestSemVer @($byVersion.Keys)
+          if (-not $latest) {
+            Write-Host "$($lock.repository) has no releases yet."
+            exit 0
+          }
+
+          $current = if ($lock.tag) { $lock.tag -replace '^v', '' } else { $null }
+          if ($current -and (Compare-SemVer $latest $current) -le 0) {
+            Write-Host "spec.lock.json is up to date ($($lock.tag))."
+            exit 0
+          }
+
+          $tag = $byVersion[$latest]
+          $branch = "spec/$tag"
+          git ls-remote --exit-code --heads origin $branch | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Branch $branch already exists; the pull request is open or was declined."
+            exit 0
+          }
+
+          $commit = gh api "repos/$($lock.repository)/commits/$tag" --jq .sha
+          if ($LASTEXITCODE -ne 0) { throw "Could not resolve $tag." }
+
+          $from = if ($lock.tag) { $lock.tag } else { "commit $($lock.commit.Substring(0, 7))" }
+          $lock.tag = $tag
+          $lock.commit = $commit
+          ($lock | ConvertTo-Json) + "`n" | Set-Content spec.lock.json -NoNewline -Encoding utf8NoBOM
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "from=$from" >> $env:GITHUB_OUTPUT
+          "branch=$branch" >> $env:GITHUB_OUTPUT
+          "repository=$($lock.repository)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-python@v7
+        if: steps.check.outputs.tag != ''
+        with:
+          python-version: "3.13"
+
+      - name: Test against the new release
+        id: test
+        if: steps.check.outputs.tag != ''
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          ./tools/fetch-spec.ps1
+          python tools/embed_spec.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pip install -e ".[test]"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pytest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Open pull request
+        if: steps.check.outputs.tag != ''
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          FROM: ${{ steps.check.outputs.from }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          REPOSITORY: ${{ steps.check.outputs.repository }}
+          OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          if [[ "$OUTCOME" == "success" ]]; then
+            result="Tests pass against $TAG."
+          else
+            result="**Tests fail against $TAG.** See the [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add spec.lock.json
+          git commit -m "Update auditfile-spec to $TAG"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Update auditfile-spec to $TAG" \
+            --body "Updates auditfile-spec from $FROM to [$TAG](https://github.com/$REPOSITORY/releases/tag/$TAG).
+
+          $result"
+          gh workflow run ci.yml --ref "$BRANCH"
+
+      - name: Fail when the new release breaks the tests
+        if: steps.test.outcome == 'failure'
+        run: exit 1

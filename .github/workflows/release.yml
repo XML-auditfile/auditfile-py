@@ -5,6 +5,7 @@ name: Release
 # - from release/X.Y (maintenance of an older line, e.g. a security fix 0.1.1 after 1.0.0):
 #   the version must be in line X.Y and higher than the latest release in that line.
 #   Branch release/X.Y off the tag of that line, e.g. git switch -c release/0.1 0.1.0.
+# Either way the commit must hold commits that the previous release does not.
 # Checks the version, fetches the auditfile-spec pinned in spec.lock.json, builds the sdist and wheel (with the
 # embedded spec), tests the wheel, creates the tag and GitHub release, and publishes to PyPI when the PYPI_PUBLISH
 # variable is "true".
@@ -50,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           . ./tools/semver.ps1
-          $isLatest = Assert-ReleaseVersion $env:VERSION $env:GITHUB_REF @(git tag --list)
+          $isLatest = Assert-ReleaseVersion $env:VERSION $env:GITHUB_REF @(git tag --list) $env:GITHUB_SHA
           if ($env:VERSION -notmatch '^(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.(0|[1-9]\d*))?$') {
             throw "$env:VERSION has no PEP 440 form with the same order: use X.Y.Z or a pre-release X.Y.Z-alpha.N, -beta.N or -rc.N."
           }
