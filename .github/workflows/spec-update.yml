@@ -107,12 +107,15 @@ jobs:
             result="**Tests fail against $TAG.** See the [workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
-          git add spec.lock.json
-          git commit -m "Update auditfile-spec to $TAG"
-          git push origin "$BRANCH"
+          # Committed through the GitHub API, not with git push: GitHub signs commits it makes for GITHUB_TOKEN,
+          # so the branch rule "Commits must have verified signatures" accepts them.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$GITHUB_SHA" > /dev/null
+          blob=$(gh api "repos/$GITHUB_REPOSITORY/contents/spec.lock.json?ref=$BRANCH" --jq .sha)
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/spec.lock.json" \
+            -f branch="$BRANCH" \
+            -f message="Update auditfile-spec to $TAG" \
+            -f content="$(base64 -w0 spec.lock.json)" \
+            -f sha="$blob" > /dev/null
           gh pr create --base main --head "$BRANCH" \
             --title "Update auditfile-spec to $TAG" \
             --body "Updates auditfile-spec from $FROM to [$TAG](https://github.com/$REPOSITORY/releases/tag/$TAG).
