@@ -198,7 +198,7 @@ Like the .NET reader, identity constraints follow XPath 1.0: an unprefixed step 
 | `src/xml_auditfile/` | The reader; `memory.py` holds `MemorySink`, `xsd/` the XSD validator |
 | `tests/` | Tests (pytest), using the XAF 3.2 sample in `tests/data/xaf-3.2-sample.xaf` (two intended findings: XAF-R001, XAF-R003) |
 | `spec.lock.json` | The pinned auditfile-spec release |
-| `tools/` | `fetch-spec.ps1` (copies `generated/` of the pinned spec into `spec/generated/`), `embed_spec.py` and `semver.ps1` (version checks of the release workflow) |
+| `tools/` | `fetch-spec.ps1` (copies `generated/` of the pinned spec into `spec/generated/`), `embed_spec.py`, `generate_constants.py` (version constants from the registry) and `semver.ps1` (version checks of the release workflow) |
 
 Example programs live in [auditfile-py-samples](https://github.com/XML-auditfile/auditfile-py-samples).
 
@@ -216,6 +216,10 @@ pytest
 ```
 
 To use a local spec checkout instead: `SPEC_ROOT=../auditfile-spec python tools/embed_spec.py`.
+
+The version constants (`AuditfileVersion.Financial.V3_2`, ...) are written from the registry of the pinned spec by
+`python tools/generate_constants.py`; run it after `spec.lock.json` changes. CI checks that they match.
+`spec-update.yml` does both when auditfile-spec has a new release, and opens a pull request.
 
 ## Workflows
 

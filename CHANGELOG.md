@@ -7,6 +7,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- XAF 3.1 and 3.2.1 (auditfile-spec 0.0.4): `AuditfileVersion.Financial.V3_1` and `V3_2_1`. The 3.2.1 XSD has no keys or
+  references, so a 3.2.1 file gets no reference checks (XAF-R003).
 - Custom dialects and views at runtime, in the format of auditfile-spec: `Auditfile.dialects.add(version, json)` and
   `Auditfile.views.add(json)`, with `remove` and `clear` (`DialectRegistry`, `ViewRegistry`). They appear after the
   built-in ones in `AuditfileVersion.dialects`, `views` and `find_view`.

@@ -159,11 +159,15 @@ class AuditfileVersion:
 
     # The version constants. A test checks that every registry entry has a constant here and vice versa.
     # Names follow the registry: version with underscores, e.g. V3_2 for 3.2.
+    # Written by tools/generate_constants.py from the registry; do not edit between the markers.
 
+    # <generated: constants>
     class Financial:
         """Auditfile Financieel (XAF)."""
 
+        V3_1 = _Constant("xaf/3.1")
         V3_2 = _Constant("xaf/3.2")
+        V3_2_1 = _Constant("xaf/3.2.1")
         V4_0_3 = _Constant("xaf/4.0.3")
 
     class CashRegister:
@@ -195,8 +199,10 @@ class AuditfileVersion:
         V2025_1_0 = _Constant("xas/2025.1.0")
         V2026_1_0 = _Constant("xas/2026.1.0")
         V2027_1_0 = _Constant("xas/2027.1.0")
+    # </generated: constants>
 
 
+# <generated: groups>
 VERSION_GROUPS = (
     AuditfileVersion.Financial,
     AuditfileVersion.CashRegister,
@@ -204,6 +210,7 @@ VERSION_GROUPS = (
     AuditfileVersion.TripRegistration,
     AuditfileVersion.Payroll,
 )
+# </generated: groups>
 
 
 class Resolution:
