@@ -36,6 +36,10 @@ jobs:
       - name: Embed the spec
         run: python tools/embed_spec.py
 
+      # The constants are written from the registry (tools/generate_constants.py); they must match the locked spec.
+      - name: Check the version constants
+        run: python tools/generate_constants.py --check
+
       - name: Install
         run: pip install -e ".[test]"
 

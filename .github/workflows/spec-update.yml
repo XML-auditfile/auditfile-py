@@ -1,7 +1,8 @@
 name: auditfile-spec update
 
 # Daily: looks for an auditfile-spec release higher than the one in spec.lock.json.
-# When found, updates the lock, tests against it, and opens a pull request with the result.
+# When found, updates the lock, writes the version constants from its registry, tests against it, and opens a
+# pull request with the result. The lock and the constants go in one commit, so the pull request is ready to merge.
 # A pull request opened with GITHUB_TOKEN does not trigger CI by itself; this workflow starts CI on the branch
 # (workflow_dispatch is the one event GITHUB_TOKEN may trigger), so the required check runs. The test result is also
 # in the PR body.
@@ -25,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      # Written from the registry of the new release, committed with spec.lock.json.
+      CONSTANTS: src/xml_auditfile/versions.py
     steps:
       - uses: actions/checkout@v7
 
@@ -78,13 +81,20 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Update the version constants
+        if: steps.check.outputs.tag != ''
+        shell: pwsh
+        run: |
+          ./tools/fetch-spec.ps1
+          python tools/generate_constants.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Test against the new release
         id: test
         if: steps.check.outputs.tag != ''
         continue-on-error: true
         shell: pwsh
         run: |
-          ./tools/fetch-spec.ps1
           python tools/embed_spec.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
           pip install -e ".[test]"
@@ -109,13 +119,18 @@ jobs:
 
           # Committed through the GitHub API, not with git push: GitHub signs commits it makes for GITHUB_TOKEN,
           # so the branch rule "Commits must have verified signatures" accepts them.
+          # One commit holds spec.lock.json and the regenerated version constants (createCommitOnBranch).
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$GITHUB_SHA" > /dev/null
-          blob=$(gh api "repos/$GITHUB_REPOSITORY/contents/spec.lock.json?ref=$BRANCH" --jq .sha)
-          gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/spec.lock.json" \
-            -f branch="$BRANCH" \
-            -f message="Update auditfile-spec to $TAG" \
-            -f content="$(base64 -w0 spec.lock.json)" \
-            -f sha="$blob" > /dev/null
+          additions=$(git diff --name-only -- spec.lock.json "$CONSTANTS" | while read -r path; do
+            jq -n --arg path "$path" --arg contents "$(base64 -w0 "$path")" '{path: $path, contents: $contents}'
+          done | jq -s .)
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" --arg branch "$BRANCH" --arg head "$GITHUB_SHA" \
+            --arg headline "Update auditfile-spec to $TAG" --argjson additions "$additions" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {input: {branch: {repositoryNameWithOwner: $repository, branchName: $branch},
+                message: {headline: $headline}, expectedHeadOid: $head, fileChanges: {additions: $additions}}}}' \
+            | gh api graphql --input - > /dev/null
           gh pr create --base main --head "$BRANCH" \
             --title "Update auditfile-spec to $TAG" \
             --body "Updates auditfile-spec from $FROM to [$TAG](https://github.com/$REPOSITORY/releases/tag/$TAG).
