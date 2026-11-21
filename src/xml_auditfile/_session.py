@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Any
 
 from ._checks import XAF, ReferenceChecker, XafRules
+from ._keys import SEPARATOR
 from ._streams import ConcatenatedStream, SourceError, _reader
 from ._xml import END, START, TEXT, Event, XmlEncodingError, XmlReader, XmlSyntaxError
 from .definitions import ColumnType, Dialect, DialectAction, DialectCorrection
@@ -17,8 +18,8 @@ from .options import CANCELLATION_INTERVAL, ReadMode, ReadOptions
 from .rows import AuditfileRow
 from .schema import AuditfileSchema, SchemaColumn, SchemaTable
 from .source import AuditfileSource, PartInfo, SourcePart
-from .values import try_convert
-from .versions import Resolution, resolve_version
+from .values import to_text, try_convert
+from .versions import AuditfileVersion, Resolution, resolve_version
 from .xsd import SchemaSet, XsdValidator
 
 _PEEK_LIMIT = 1024 * 1024
@@ -106,16 +107,39 @@ class MappingPlan:
         return node
 
 
+# How a table element is read. Everything in the first document is new; the states below only occur in a later part
+# of a split audit file of complete files, which repeats the header, the company and the master data.
+_NEW = 0
+"""A new row."""
+_MERGED = 1
+"""The row of an earlier part (same singleton, or same key): not handed out again; its child rows belong to that row."""
+_HIDDEN = 2
+"""Master data repeated from an earlier part: neither the row nor its child rows are handed out."""
+_PENDING = 3
+"""A row with a key, until the key is known: when its first child table opens, or when it closes."""
+
+
+class _MergeTarget:
+    """A row handed out before, that a later part can merge into: its id and the ordinals of its child rows."""
+
+    __slots__ = ("document", "id", "ordinals")
+
+    def __init__(self, id_: int, document: int, ordinals: dict[int, int] | None) -> None:
+        self.id = id_
+        self.document = document
+        self.ordinals = ordinals
+
+
 class _Frame:
     """An open table element."""
 
-    __slots__ = ("plan", "id", "parent_id", "ordinal", "part", "node", "values", "present", "groups", "_ordinals")
+    __slots__ = ("plan", "parent", "id", "ordinal", "part", "node", "values", "present", "groups", "ordinals", "state", "singleton", "key")
 
-    def __init__(self, plan: _TablePlan, id_: int, parent_id: int | None, ordinal: int, part: int, node: _PathNode) -> None:
+    def __init__(self, plan: _TablePlan, parent: _Frame | None, part: int, node: _PathNode) -> None:
         self.plan = plan
-        self.id = id_
-        self.parent_id = parent_id
-        self.ordinal = ordinal
+        self.parent = parent
+        self.id = 0
+        self.ordinal = 1
         self.part = part
         self.node = node
         self.values: list[object] = [None] * len(plan.table.columns)
@@ -123,15 +147,30 @@ class _Frame:
         """Columns that occurred, also when their value was invalid."""
         self.groups: set[_PathNode] = set()
         """Groups that occurred within this row."""
-        self._ordinals: dict[int, int] | None = None
+        self.ordinals: dict[int, int] | None = None
+        """The last ordinal per child table."""
+        self.state = _NEW
+        self.singleton = False
+        """True for the root and the single elements under it (header, company), which a later part merges into."""
+        self.key: str | None = None
+        """The key value, once known."""
 
     def next_ordinal(self, child: _TablePlan) -> int:
-        if self._ordinals is None:
-            self._ordinals = {}
+        if self.ordinals is None:
+            self.ordinals = {}
 
-        value = self._ordinals.get(id(child), 0) + 1
-        self._ordinals[id(child)] = value
+        value = self.ordinals.get(id(child), 0) + 1
+        self.ordinals[id(child)] = value
         return value
+
+    def merge_into(self, target: _MergeTarget) -> None:
+        """Continues as the row of an earlier part: same id, and child rows numbered after the ones it already has."""
+        self.state = _MERGED
+        self.id = target.id
+        if target.ordinals is None:
+            target.ordinals = {}
+
+        self.ordinals = target.ordinals
 
 
 class _Capture:
@@ -151,12 +190,20 @@ class RowLoader:
     The load phase: walks the XML once and turns elements into rows using the mapping plan.
     A row is emitted when its element closes, so all its columns are known; ids are assigned when it opens,
     so they follow document order. Only the open elements are kept in memory.
+
+    A split audit file of complete files (every part has its own root element, header and company) is read as one:
+    the root, the header and the company are those of the first part, and the elements of a later part are added to them.
+    A row with a key (the first key of its table) that an earlier part already had is not handed out again; a row
+    without a key under such a row is master data repeated from that part and is left out, except in XAF under
+    company/transactions, where every part adds its own transactions. Rows that are not handed out still reach the
+    observers that check each part on its own (XafRules); keys and references are checked on the rows handed out.
     """
 
     def __init__(
         self, reader: XmlReader, schema: AuditfileSchema, resolution: Resolution, options: ReadOptions,
-        diagnostics: DiagnosticCollector, observers: list[Any], validate: Callable[[Event], None] | None,
+        diagnostics: DiagnosticCollector, observers: list[Any], validate: Callable[[Event], None] | None, merge: bool = False,
     ) -> None:
+        """merge: the source has more than one part, which may be complete audit files that are read as one."""
         self._reader = reader
         self._plan = MappingPlan(schema)
         self._resolution = resolution
@@ -181,6 +228,23 @@ class RowLoader:
         self._use_dialect(resolution.dialect)
         # Without the XSD nobody else notices a missing required field; with it, XAF-D001 already does.
         self._check_required = options.mode is ReadMode.UNVERIFIED
+        self._document = 0
+        """Number of the document being read: 1, or higher in a later part of a split audit file of complete files."""
+        self._merge = merge
+        self._singletons: dict[str, _MergeTarget] = {}
+        """The root and the single elements under it, by parent id and table."""
+        self._keys: dict[int, tuple[tuple[int, ...], dict[str, _MergeTarget]]] = {}
+        """Rows with a key, per table (by id): the key columns and the rows by key."""
+        version = resolution.version
+        self._own_rows_path = f"{version.root_element}/company/transactions" if version.type == XAF else None
+        """Path under which every part adds its own rows (XAF: the transactions), or None when there is none."""
+        self._hidden_id = 0
+        """Ids of rows that are not handed out count down, so they never meet the ids of rows that are."""
+        if merge:
+            for table in schema.tables:
+                if table.keys:
+                    columns = tuple(table.find_column(c).index for c in table.keys[0].columns)  # type: ignore[union-attr]
+                    self._keys[id(table)] = (columns, {})
 
     def rows(self) -> Iterator[AuditfileRow]:
         """Rows in document order of their closing tags."""
@@ -253,6 +317,14 @@ class RowLoader:
             self.stopped = True
             return
 
+        # A root element after the first: the next part of a split audit file of complete files.
+        if event.depth == 0:
+            self._document += 1
+            if self._document > 1 and not is_root_of(event, self._resolution.version):
+                self._diagnostics.add("XAF-V005", self._here(None), **root_mismatch(event, self._resolution.version))
+                self.stopped = True
+                return
+
         current = self._nodes[-1] if self._nodes else self._plan.root
         node = current.children.get(event.local) if event.ns == self._namespace else None
         if node is None:
@@ -274,8 +346,11 @@ class RowLoader:
             self._skip(node.path, event)
 
     def _start_table(self, node: _PathNode, table: _TablePlan, top: _Frame | None, event: Event) -> None:
-        self._next_id += 1
-        frame = _Frame(table, self._next_id, top.id if top else None, top.next_ordinal(table) if top else 1, event.part, node)
+        if top is not None and top.state == _PENDING:
+            self._resolve(top)
+
+        frame = _Frame(table, top, event.part, node)
+        self._place(frame)
         self._read_attributes(node, frame, event)
         if table.is_value_table:
             self._capture = _Capture(frame, table.table.columns[0], node.path, True)
@@ -383,19 +458,128 @@ class RowLoader:
             if not frame.present[column.index] and (group is None or group in frame.groups):
                 self._diagnostics.add("XAF-S006", self._here(frame.node.path), column=column.name, table=frame.plan.table.name)
 
+    def _place(self, frame: _Frame) -> None:
+        """Decides how a table element that just opened is read, and numbers it when that is already known."""
+        parent = frame.parent
+        table = frame.plan.table
+        frame.singleton = self._merge and table.max_occurs == 1 and (parent is None or parent.singleton)
+        if self._document > 1:
+            if parent is not None and parent.state == _HIDDEN:
+                frame.state = _HIDDEN
+            elif frame.singleton:
+                target = self._singletons.get(_singleton_key(parent, table))
+                if target is not None:
+                    frame.merge_into(target)
+                    return
+            elif id(table) in self._keys:
+                # Numbered once the key is known: a row that an earlier part already had keeps that row's id.
+                frame.state = _PENDING
+                return
+            elif parent is not None and parent.state == _MERGED and not self._adds_own_rows(table):
+                frame.state = _HIDDEN
+
+        if frame.state == _HIDDEN:
+            self._hidden_id -= 1
+            frame.id = self._hidden_id
+            return
+
+        self._number(frame)
+        if frame.singleton:
+            frame.ordinals = {}
+            self._singletons[_singleton_key(parent, table)] = _MergeTarget(frame.id, self._document, frame.ordinals)
+
+    def _number(self, frame: _Frame) -> None:
+        frame.state = _NEW
+        self._next_id += 1
+        frame.id = self._next_id
+        frame.ordinal = frame.parent.next_ordinal(frame.plan) if frame.parent is not None else 1
+
+    def _resolve(self, frame: _Frame) -> None:
+        """A row with a key in a later part: the row of an earlier part with the same key, or a new row."""
+        columns, targets = self._keys[id(frame.plan.table)]
+        frame.key = _key_of(frame.values, columns)
+        target = targets.get(frame.key) if frame.key is not None else None
+        if target is not None and target.document < self._document:
+            frame.merge_into(target)
+        else:
+            self._number(frame)
+
+    def _adds_own_rows(self, table: SchemaTable) -> bool:
+        """True when every part adds its own rows to this table, so a part never repeats those of another."""
+        path = self._own_rows_path
+        return path is None or table.path == path or table.path.startswith(path + "/")
+
+    def _remember(self, frame: _Frame) -> None:
+        """Remembers a row with a key, so a later part that repeats it merges into it."""
+        keys = self._keys.get(id(frame.plan.table))
+        if keys is None:
+            return
+
+        columns, targets = keys
+        if frame.key is None:
+            frame.key = _key_of(frame.values, columns)
+
+        if frame.key is not None and frame.key not in targets:
+            targets[frame.key] = _MergeTarget(frame.id, self._document, frame.ordinals)
+
     def _emit(self, frame: _Frame) -> None:
+        if frame.state == _PENDING:
+            self._resolve(frame)
+
         if self._check_required:
             self._check_required_columns(frame)
 
-        row = AuditfileRow(frame.plan.table, frame.id, frame.parent_id, frame.ordinal, frame.part, tuple(frame.values))
+        parent_id = frame.parent.id if frame.parent is not None else None
+        row = AuditfileRow(frame.plan.table, frame.id, parent_id, frame.ordinal, frame.part, tuple(frame.values))
+        if frame.state != _NEW:
+            # A repeated header or company, or repeated master data: checked with its own part, not handed out again.
+            for observer in self._observers:
+                if getattr(observer, "checks_each_part", False):
+                    observer.on_row(row)
+
+            return
+
         for observer in self._observers:
             observer.on_row(row)
+
+        if self._merge:
+            self._remember(frame)
 
         self._ready.append(row)
 
     def _here(self, path: str | None) -> Location:
         event = self._event
         return Location(event.part if event else None, event.line if event else None, event.column if event else None, path)
+
+
+def _singleton_key(parent: _Frame | None, table: SchemaTable) -> str:
+    return f"{parent.id if parent is not None else ''}/{table.name}"
+
+
+def _key_of(values: list[object], columns: tuple[int, ...]) -> str | None:
+    """The key of a row as one string, or None when a key column has no value."""
+    parts = []
+    for column in columns:
+        value = values[column]
+        if value is None:
+            return None
+
+        parts.append(to_text(value))
+
+    return SEPARATOR.join(parts)
+
+
+def is_root_of(event: Event, version: AuditfileVersion) -> bool:
+    """True when a root element is that of the version, as the root element of every part must be."""
+    return event.ns == version.namespace and event.local == version.root_element
+
+
+def root_mismatch(event: Event, version: AuditfileVersion) -> dict[str, str]:
+    """The arguments of XAF-V005 for the root element of a later part; with the namespace when that is what differs."""
+    if event.local == version.root_element:
+        return {"element": f"{{{event.ns}}}{event.local}", "expected": f"{{{version.namespace}}}{version.root_element}"}
+
+    return {"element": event.local, "expected": version.root_element}
 
 
 class _Document:
@@ -481,7 +665,9 @@ class ReadSession:
             if self.resolution.version.type == XAF:
                 observers.append(XafRules(self.schema, self.diagnostics))
 
-            loader = RowLoader(document.reader, self.schema, self.resolution, self._options, self.diagnostics, observers, validate)
+            loader = RowLoader(
+                document.reader, self.schema, self.resolution, self._options, self.diagnostics, observers, validate, len(self._source.parts) > 1
+            )
             counts = self._row_counts
             for row in loader.rows():
                 name = row.table.name
@@ -547,24 +733,30 @@ class ReadSession:
                     return
 
             try:
-                counts = self._count_rows(reader, feed)
-                if counts is None:
+                result = self._count_rows(reader, feed)
+                if result is None:
                     return
             except (XmlSyntaxError, XmlEncodingError, SourceError) as error:
                 self._xml_error(error)
                 return
 
+            counts, documents = result
             self._parts = list(stream.completed)
             self._check_tables(counts)
+            # Parts that are complete audit files repeat the header, the company and master data, which loading merges:
+            # the rows per table are known only then, so the schema has no counts rather than counts that are too high.
             r = self.resolution
-            self.schema = AuditfileSchema._create(r.version, r.file_namespace, r.source, r.dialect.name if r.dialect else None, counts)
+            self.schema = AuditfileSchema._create(
+                r.version, r.file_namespace, r.source, r.dialect.name if r.dialect else None, None if documents > 1 else counts
+            )
         finally:
             reader.close()
 
-    def _count_rows(self, reader: XmlReader, feed: Callable[[Event], None] | None) -> dict[str, int] | None:
+    def _count_rows(self, reader: XmlReader, feed: Callable[[Event], None] | None) -> tuple[dict[str, int], int] | None:
         """
-        Walks the document (feeding the XSD validator, when validating) and counts the rows per table.
-        Recognizes a dialect by the software description on the way. Returns None after XAF-X003.
+        Walks the document (feeding the XSD validator, when validating) and counts the rows per table and the documents:
+        more than one for a split audit file of complete files. Recognizes a dialect by the software description on the way.
+        Returns None after XAF-X003, or XAF-V005 for a part with another root element.
         """
         r = self.resolution
         assert r is not None
@@ -580,6 +772,7 @@ class ReadSession:
         software_length = 0
         software_depth = -1
         events = 0
+        documents = 0
 
         while (event := reader.next()) is not None:
             if events % CANCELLATION_INTERVAL == 0:
@@ -606,6 +799,12 @@ class ReadSession:
                 self.diagnostics.add("XAF-X003", Location(event.part, event.line, event.column, None), max=max_depth)
                 return None
 
+            if depth == 0:
+                documents += 1
+                if documents > 1 and not is_root_of(event, r.version):
+                    self.diagnostics.add("XAF-V005", Location(event.part, event.line, event.column, None), **root_mismatch(event, r.version))
+                    return None
+
             parent = nodes[depth - 1] if depth > 0 else plan.root
             node = parent.children.get(event.local) if parent is not None and event.ns == namespace else None
             if len(nodes) <= depth:
@@ -623,7 +822,7 @@ class ReadSession:
                 software_length = 0
                 software_depth = depth
 
-        return counts
+        return counts, documents
 
     def _xml_error(self, error: XmlSyntaxError | XmlEncodingError | SourceError) -> None:
         if isinstance(error, SourceError):

@@ -137,6 +137,7 @@ class XsdValidator:
     """
     Streaming validator for a compiled SchemaSet. Feed it the element events of a document in order;
     it reports every violation through report(message, line, column) and never stops on its own.
+    Several documents can follow one another: each root element is validated as a document of its own.
     """
 
     def __init__(self, schema_set: SchemaSet, report: Report, max_value_length: int | None = None, identity_constraints: bool = True) -> None:
@@ -155,6 +156,8 @@ class XsdValidator:
         parent = self._stack[-1] if self._stack else None
         declaration: ElementDeclaration | None = None
         if parent is None:
+            # A root element: the first of the document, or of the next document (a part of a split audit file of complete files).
+            self._ids = set()
             declaration = self._set.elements.get(qualified(event.ns, event.local))
             if declaration is None:
                 self._error(event, f"Element '{event.local}': No matching global declaration available for the validation root.")

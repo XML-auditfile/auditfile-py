@@ -218,6 +218,9 @@ class _TotalsRule:
         _compare(row, self._count.name, row.get_integer(self._count), actual.count, diagnostics)
         _compare(row, self._debit.name, row.get_decimal(self._debit), actual.debit, diagnostics)
         _compare(row, self._credit.name, row.get_decimal(self._credit), actual.credit, diagnostics)
+        if not self._per_parent:
+            # The next owner is the company of the next part of a split audit file of complete files, with its own lines.
+            self._all = _Totals()
 
 
 class XafRules:
@@ -225,6 +228,12 @@ class XafRules:
     Business rules for Auditfile Financieel (XAF):
     every transaction balances, and the counts and totals in the headers match the lines.
     Rules whose tables or columns do not exist in a version are skipped. Columns are looked up once, not per row.
+    """
+
+    checks_each_part = True
+    """
+    Sees every row as read, also the header, company and master data that a later part of a split audit file of
+    complete files repeats and that are not handed out again: each part's counts and totals are checked against its own lines.
     """
 
     def __init__(self, schema: AuditfileSchema, diagnostics: DiagnosticCollector) -> None:

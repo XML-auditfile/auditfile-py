@@ -158,8 +158,10 @@ class _Statistics:
 
 class ConcatenatedStream:
     """
-    Reads the parts of a source one after another as one document.
-    For continuation parts a leading byte order mark and XML declaration are skipped.
+    Reads the parts of a source one after another.
+    A part that follows a complete document (see is_document_complete) is a complete audit file itself and starts a new
+    document; any other part continues the document, and its leading byte order mark and XML declaration are skipped.
+    A part in another encoding than the first is refused (PartEncodingError).
     Collects size, SHA-256 and line count per part when collect_statistics is set.
     """
 
@@ -170,8 +172,15 @@ class ConcatenatedStream:
         """Statistics of the parts read completely so far."""
         self.part = 0
         """Number (1-based) of the part the most recent chunk came from."""
+        self.document = 0
+        """Number (1-based) of the document the most recent chunk belongs to."""
         self.position = 0
         """Bytes handed out so far, over all parts."""
+        self.is_document_complete: Callable[[], bool] = lambda: False
+        """
+        Set by the reader: True when the bytes handed out so far form a complete document (its root element is closed),
+        so the next part starts a new one. Asked when a part after the first is opened.
+        """
         self._encoding: _PartEncoding | None = None
 
     def chunks(self) -> Iterator[bytes]:
@@ -216,7 +225,12 @@ class ConcatenatedStream:
                 elif self._encoding is not None and not encoding.same_as(self._encoding):
                     raise PartEncodingError(part.number, encoding, self._encoding)
 
-                rest = first if part.number == 1 else first[encoding.skip_declaration(first) :]
+                # A new document keeps its own XML declaration; a continuation must not repeat it.
+                starts_document = part.number == 1 or self.is_document_complete()
+                if starts_document:
+                    self.document += 1
+
+                rest = first if starts_document else first[encoding.skip_declaration(first) :]
                 if rest:
                     self.position += len(rest)
                     yield rest

@@ -72,7 +72,8 @@ polars has no index, so ``_id`` is the first column. Every column gets the polar
   Rows know their id, parent, position and source part; values are typed.
 - **Checks** required and expected tables, keys, references and the XAF business rules
   (balanced transactions, header counts and totals).
-- **Reads split audit files** (`audit.xaf`, `audit-2.xaf`, ...) as one file; you pass the parts in order.
+- **Reads split audit files** (`audit.xaf`, `audit-2.xaf`, ...) as one file, whether the parts continue one document or
+  are complete audit files each; you pass the parts in order (see [Split audit files](#split-audit-files)).
 - **Reports** everything as diagnostics with stable codes, in Dutch or English.
 
 ## Entry points
@@ -105,6 +106,34 @@ the load phase; the call then raises `ReadCancelledError`. When a sink fails and
 
 A sink is any object with `begin(context)`, `write(table, rows)`, `complete(report)` and `abort(report)` (the `Sink`
 protocol). Set `capabilities = SinkCapabilities.NEEDS_ROW_COUNTS` to get row counts before the first row.
+
+## Split audit files
+
+Pass the parts in order (`from_factories` or `from_streams`); they are read as one audit file, and every row knows the
+part it came from (`row.part`). A part is read in one of two ways:
+
+- **Continuation part**, the way the Belastingdienst describes for XAF: the first part has the header and everything
+  under the company except the transactions; the next parts continue the document from a whole transaction on, usually
+  after a comment such as `<!-- Vervolgbestand 2 van 3 -->`. A leading XML declaration is skipped.
+- **Complete audit file**: a part that follows a complete document (its root element is closed) is an audit file of its
+  own, with its own root element, header, company and master data, such as one file per quarter (XAF 4.0, option 2).
+  The parts are merged:
+  - The root, the header and the company are those of the first part. A later header or company is read and checked,
+    but not handed out again; the counts and totals of the company row are those of the first part.
+  - A row whose key (the first key of its table in the manifest, such as `cust_sup_id`, `acc_id` or `jrn_id`) an earlier
+    part already had is not handed out again; its child rows belong to the earlier row and are numbered after its own.
+    A row with a new key is added.
+  - In XAF, master data without a key under such a row (addresses, history, the opening balance) comes from the first
+    part, and every part adds its own transactions: a journal in several parts is one journal with the transactions of
+    every part. Other types keep the rows without a key of every part.
+  - Every part is validated against the XSD on its own, and its counts and totals are checked against its own lines
+    (XAF-R002). Keys and references (XAF-R003, XAF-R004) are checked on the merged rows. The root element of every part
+    must be that of the first (XAF-V005).
+  - Row counts are known only after loading: the scan gives none (`schema.has_row_counts` is false).
+  - XAF 3.2.1 and 4.0.3 declare no keys, so their master data comes from the first part only, and a journal in several
+    parts appears once per part.
+
+All parts must have the same encoding (XAF-X004). Line numbers in diagnostics continue over the parts.
 
 ## Custom dialects and views
 
@@ -172,7 +201,7 @@ leaving out infos and warnings, and fatal diagnostics are always included. `is_v
 | Layer | Codes this reader reports |
 | ----- | ------------------------- |
 | XML | X001–X004 (X004 also for a part of a split file in another encoding than the first part), X900 |
-| Version | V001–V006 |
+| Version | V001–V006 (V005 also for a part of a split audit file of complete files with another root element) |
 | Structure | S001–S005, S008; S006 in unverified mode (in verified mode the XSD reports a missing field as D001) |
 | XSD | D001, D002 |
 | Rules | R001–R004, R017 |

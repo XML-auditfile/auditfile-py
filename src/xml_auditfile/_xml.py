@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from typing import Any
 from xml.parsers import expat
 
 from ._streams import ConcatenatedStream, XmlEncodingError
@@ -67,11 +68,18 @@ def _split(name: str) -> tuple[str, str]:
 
 
 class XmlReader:
+    """
+    Pull reader over a byte stream: start, text and end events with line, column, depth and source part.
+
+    The stream can hold several documents, one per part of a split audit file of complete files: each is parsed on its own,
+    and the root element of the next one follows as another event at depth 0. Line numbers continue over the parts,
+    as for a split audit file that is cut into continuation parts.
+    """
+
     def __init__(self, stream: ConcatenatedStream, max_bytes: int = 0) -> None:
         """max_bytes: size of the whole document; 0 is no limit."""
         self._max_bytes = max_bytes
         self._stream = stream
-        self._chunks = stream.chunks()
         self._queue: deque[Event] = deque()
         self._depth = 0
         self._ended = False
@@ -82,7 +90,18 @@ class XmlReader:
         self._fed = 0
         self.root_offset: int | None = None
         """Bytes before the chunk in which the root element starts; precise to one chunk (64 KB)."""
+        self._document = 1
+        """Number of the document being parsed (1-based)."""
+        self._saw_root = False
+        self._closed_root = False
+        self._line_offset = 0
+        """Lines of the documents before this one, so line numbers continue over the parts."""
+        # Asked before the next part is read, so everything before it has been parsed.
+        stream.is_document_complete = lambda: self._closed_root and self._depth == 0
+        self._chunks = stream.chunks()
+        self._parser = self._create_parser()
 
+    def _create_parser(self) -> Any:
         parser = expat.ParserCreate(namespace_separator=" ")
         parser.buffer_text = True
         parser.buffer_size = 65536
@@ -95,7 +114,25 @@ class XmlReader:
         parser.StartElementHandler = self._start
         parser.EndElementHandler = self._end
         parser.CharacterDataHandler = self._characters
-        self._parser = parser
+        return parser
+
+    def _start_document(self) -> None:
+        """Ends the document parsed so far and starts the next one: a part that is a complete audit file itself."""
+        # The next document starts on the line this one ends on.
+        line = self._parser.CurrentLineNumber
+        self._finish_document()
+        self._line_offset += line - 1
+        self._parser = self._create_parser()
+        self._document = self._stream.document
+        self._saw_root = False
+        self._closed_root = False
+
+    def _finish_document(self) -> None:
+        # A later part with nothing but comments adds nothing; only the first must have a root element.
+        if self._document == 1 or self._saw_root:
+            self._parser.Parse(b"", True)
+
+        self._flush()
 
     @property
     def position(self) -> int:
@@ -142,16 +179,18 @@ class XmlReader:
         try:
             if data is None:
                 self._ended = True
-                self._parser.Parse(b"", True)
-                self._flush()
+                self._finish_document()
                 return
+
+            if self._stream.document != self._document:
+                self._start_document()
 
             if self._first is None:
                 self._first = data[:512]
 
             self._fed += len(data)
             if self._max_bytes and self._fed > self._max_bytes:
-                raise _Refused(f"The document is larger than {self._max_bytes} bytes.", self._parser.CurrentLineNumber, self._parser.CurrentColumnNumber + 1)
+                raise _Refused(f"The document is larger than {self._max_bytes} bytes.", *self._here())
 
             self._parser.Parse(data, False)
             # Text is handed out per chunk, so a huge text node is never joined into one string here.
@@ -174,10 +213,10 @@ class XmlReader:
                 if error.code == _UNKNOWN_ENCODING and match is not None:
                     raise XmlEncodingError(match[2].decode("ascii")) from None
 
-            raise XmlSyntaxError(expat.ErrorString(error.code), error.lineno, error.offset + 1, self._stream.part) from None
+            raise XmlSyntaxError(expat.ErrorString(error.code), error.lineno + self._line_offset, error.offset + 1, self._stream.part) from None
 
     def _here(self) -> tuple[int, int]:
-        return self._parser.CurrentLineNumber, self._parser.CurrentColumnNumber + 1
+        return self._parser.CurrentLineNumber + self._line_offset, self._parser.CurrentColumnNumber + 1
 
     def _doctype(self, *_: object) -> None:
         line, column = self._here()
@@ -202,24 +241,34 @@ class XmlReader:
         parser = self._parser
         # Report the position of the name itself (1-based), as .NET does: after the "<".
         self._queue.append(
-            Event(START, ns, local, pairs, parser.CurrentLineNumber, parser.CurrentColumnNumber + 2, self._depth, self._stream.part, "")
+            Event(START, ns, local, pairs, parser.CurrentLineNumber + self._line_offset, parser.CurrentColumnNumber + 2, self._depth,
+                  self._stream.part, "")
         )
         if self._depth == 0:
-            self.root_offset = self._fed
+            self._saw_root = True
+            if self.root_offset is None:
+                self.root_offset = self._fed
 
         self._depth += 1
 
     def _end(self, name: str) -> None:
         self._flush()
         self._depth -= 1
+        if self._depth == 0:
+            self._closed_root = True
+
         ns, local = _split(name)
         parser = self._parser
-        self._queue.append(Event(END, ns, local, [], parser.CurrentLineNumber, parser.CurrentColumnNumber + 1, self._depth, self._stream.part, ""))
+        self._queue.append(
+            Event(END, ns, local, [], parser.CurrentLineNumber + self._line_offset, parser.CurrentColumnNumber + 1, self._depth, self._stream.part, "")
+        )
 
     def _characters(self, text: str) -> None:
         if self._text is None:
             parser = self._parser
-            self._text = Event(TEXT, "", "", [], parser.CurrentLineNumber, parser.CurrentColumnNumber + 1, self._depth, self._stream.part, text)
+            self._text = Event(
+                TEXT, "", "", [], parser.CurrentLineNumber + self._line_offset, parser.CurrentColumnNumber + 1, self._depth, self._stream.part, text
+            )
         else:
             self._text.text += text
 

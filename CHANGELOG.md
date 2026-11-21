@@ -32,3 +32,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Streaming XSD validator for the XSD subset of auditfile-spec, including identity constraints.
 - No dependencies; exact `Decimal` amounts.
 - Security: DTDs refused, embedded-only XSD resolution, depth and diagnostic limits, caller-owned streams left open.
+
+### Fixed
+- A split audit file whose parts are complete audit files (each with its own root element, header and company) is read
+  as one, instead of failing with XAF-X001: the header and company come from the first part, repeated master data is
+  merged by key, every part adds its own transactions, and each part is validated and checked against its own counts
+  and totals. A later part with another root element gives XAF-V005.

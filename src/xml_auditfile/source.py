@@ -54,7 +54,8 @@ class AuditfileSource:
     @staticmethod
     def from_streams(*parts: tuple[str, Stream]) -> AuditfileSource:
         """
-        A split audit file as streams that can be read only once: the first part followed by its continuation parts, in order.
+        A split audit file as streams that can be read only once, in order: the first part followed by its continuation parts,
+        or parts that are complete audit files each.
         The reader does not close the streams.
         """
 
@@ -94,7 +95,8 @@ class AuditfileSource:
     @staticmethod
     def from_factories(*parts: tuple[str, Callable[[], Stream]]) -> AuditfileSource:
         """
-        A split audit file as stream factories: the first part followed by its continuation parts, in order.
+        A split audit file as stream factories, in order: the first part followed by its continuation parts,
+        or parts that are complete audit files each.
         Every factory returns a fresh stream on every call. The reader closes the streams it gets.
         """
         result = []
